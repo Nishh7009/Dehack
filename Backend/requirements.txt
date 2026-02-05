@@ -1,0 +1,9 @@
+asgiref==3.11.1
+Django==6.0.2
+djangorestframework==3.16.1
+onetimepass==1.0.1
+psycopg2-binary==2.9.11
+pyotp==2.9.0
+python-dotenv==1.2.1
+six==1.17.0
+sqlparse==0.5.5

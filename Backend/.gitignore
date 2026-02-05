@@ -1,0 +1,11 @@
+*.env.dev
+*.env.prod
+*venv/
+*__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.db
+*.sqlite3
+*migrations/
+*.log
