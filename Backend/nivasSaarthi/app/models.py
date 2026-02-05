@@ -100,13 +100,39 @@ class ServiceProviderProfile(models.Model):
             raise ValueError("User must have role SERVICE_PROVIDER to have a ServiceProviderProfile")
         super().save(*args, **kwargs)
 
+class ServiceRequest(models.Model):
+    status_choices = (
+        ("PENDING", "Pending"),
+        ("ACCEPTED", "Accepted"),
+        ("REJECTED", "Rejected"),
+    )
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    customer = models.ForeignKey(NewUser, on_delete=models.CASCADE, related_name='service_requests')
+    service_provider = models.ForeignKey(NewUser, on_delete=models.CASCADE, related_name='service_offers')
+    description = models.TextField()
+    service_acceptance = models.BooleanField(default=False)
+    status = models.CharField(max_length=20, default='PENDING') # PENDING, ACCEPTED, REJECTED
+    requested_on = models.DateTimeField(auto_now_add=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"Service request by {self.customer} for {self.service_provider} on {self.requested_on.strftime('%Y-%m-%d %H:%M:%S')}"
 
 class Service(models.Model):
     # Service requested by customer from service provider
+    choices = (
+        ("IN_PROGRESS", "In Progress"),
+        ("COMPLETED", "Completed"),
+        ("CANCELLED", "Cancelled"),
+    )
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     customer = models.ForeignKey(NewUser, on_delete=models.CASCADE, related_name='services_requester')
     service_provider = models.ForeignKey(NewUser, on_delete=models.CASCADE, related_name='services_provider')
     description = models.TextField()
+    service_status = models.CharField(max_length=20, choices=choices, default='IN_PROGRESS') # IN_PROGRESS, COMPLETED, CANCELLED
+    completion_verification_from_customer = models.BooleanField(default=False)
+    completion_verification_from_provider = models.BooleanField(default=False)
     requested_on = models.DateTimeField(auto_now_add=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

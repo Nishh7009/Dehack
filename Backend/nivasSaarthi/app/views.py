@@ -3,10 +3,11 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from .permissions import IsVerifiedAndAuthenticated
 from django.contrib.auth import login
-from .models import NewUser
+from .models import NewUser, Service, ServiceRequest, ServiceProviderProfile
 from rest_framework.response import Response
 from rest_framework import status
 from pyotp import TOTP
+from django.utils import timezone
 import tempfile
 import os
 #################################### AUTH VIEWS ####################################
@@ -67,6 +68,191 @@ def profile_completion(request):
     user.save()
     return Response({"message": "Profile marked as completed"}, status=status.HTTP_200_OK)
 
+################################### SERVICE VIEWS ###################################
+@api_view(['GET'])
+@permission_classes([IsVerifiedAndAuthenticated])
+def get_services_for_provider(request):
+    provider_id = request.query_params.get('provider_id')
+    if not provider_id:
+        return Response({'message': 'Provider ID is required'}, status=status.HTTP_400_BAD_REQUEST)
+    try:
+        provider = NewUser.objects.get(id=provider_id, role=NewUser.SERVICE_PROVIDER)
+        if provider != request.user:
+            return Response({'message': 'Unauthorized access to services'}, status=status.HTTP_403_FORBIDDEN)
+        provider_profile = ServiceProviderProfile.objects.get(user=provider)
+        services = Service.objects.filter(service_provider=provider).order_by('-requested_on')
+        services_data = [{
+            'id': str(service.id),
+            'customer': service.customer.first_name + " " + service.customer.last_name,
+            'description': service.description,
+            'requested_on': service.requested_on,
+            'completed': service.completed
+        } for service in services]
+        return Response({'services': services_data}, status=status.HTTP_200_OK)
+    except NewUser.DoesNotExist:
+        return Response({'message': 'Service provider not found'}, status=status.HTTP_404_NOT_FOUND)
+
+@api_view(['GET'])
+@permission_classes([IsVerifiedAndAuthenticated])
+def get_incoming_requests(request):
+    try:
+        provider = request.user
+        if provider.role != NewUser.SERVICE_PROVIDER:
+            return Response({'message': 'Only service providers can view incoming requests'}, status=status.HTTP_403_FORBIDDEN)
+        service_requests = ServiceRequest.objects.filter(service_provider=provider, status='PENDING').order_by('-requested_on')
+        requests_data = [{
+            'id': str(req.id),
+            'customer': req.customer.first_name + " " + req.customer.last_name,
+            'description': req.description,
+            'requested_on': req.requested_on
+        } for req in service_requests]
+        return Response({'service_requests': requests_data}, status=status.HTTP_200_OK)
+    except NewUser.DoesNotExist:
+        return Response({'message': 'Service provider not found'}, status=status.HTTP_404_NOT_FOUND)
+
+@api_view(['GET'])
+@permission_classes([IsVerifiedAndAuthenticated])
+def get_outgoing_requests(request):
+    try:
+        customer = request.user
+        if customer.role != NewUser.CUSTOMER:
+            return Response({'message': 'Only customers can view outgoing requests'}, status=status.HTTP_403_FORBIDDEN)
+        service_requests = ServiceRequest.objects.filter(customer=customer).order_by('-requested_on')
+        requests_data = [{
+            'id': str(req.id),
+            'service_provider': req.service_provider.first_name + " " + req.service_provider.last_name,
+            'description': req.description,
+            'status': req.status,
+            'requested_on': req.requested_on
+        } for req in service_requests]
+        return Response({'service_requests': requests_data}, status=status.HTTP_200_OK)
+    except NewUser.DoesNotExist:
+        return Response({'message': 'Customer not found'}, status=status.HTTP_404_NOT_FOUND)
+
+@api_view(['GET'])
+@permission_classes([IsVerifiedAndAuthenticated])
+def get_services_for_customer(request):
+    customer_id = request.query_params.get('customer_id')
+    if not customer_id:
+        return Response({'message': 'Customer ID is required'}, status=status.HTTP_400_BAD_REQUEST)
+    try:
+        customer = NewUser.objects.get(id=customer_id, role=NewUser.CUSTOMER)
+        if customer != request.user:
+            return Response({'message': 'Unauthorized access to services'}, status=status.HTTP_403_FORBIDDEN)
+        services = Service.objects.filter(customer=customer).order_by('-requested_on')
+        services_data = [{
+            'id': str(service.id),
+            'service_provider': service.service_provider.first_name + " " + service.service_provider.last_name,
+            'description': service.description,
+            'requested_on': service.requested_on
+        } for service in services]
+        return Response({'services': services_data}, status=status.HTTP_200_OK)
+    except NewUser.DoesNotExist:
+        return Response({'message': 'Customer not found'}, status=status.HTTP_404_NOT_FOUND)
+
+@api_view(['GET'])
+@permission_classes([IsVerifiedAndAuthenticated])
+def get_service_details(request):
+    try:
+        service_id = request.query_params.get('service_id')
+        if not service_id:
+            return Response({'message': 'Service ID is required'}, status=status.HTTP_400_BAD_REQUEST)
+        if request.user.role == NewUser.SERVICE_PROVIDER:
+            service = Service.objects.get(id=service_id, service_provider=request.user)
+        elif request.user.role == NewUser.CUSTOMER:
+            service = Service.objects.get(id=service_id, customer=request.user)
+        if service is None:
+            return Response({'message': 'Unauthorized access to service details'}, status=status.HTTP_403_FORBIDDEN)
+        service_data = {
+            'id': str(service.id),
+            'customer': service.customer.first_name + " " + service.customer.last_name,
+            'service_provider': service.service_provider.first_name + " " + service.service_provider.last_name,
+            'description': service.description,
+            'requested_on': service.requested_on
+        }
+        return Response({'service': service_data}, status=status.HTTP_200_OK)
+    except Service.DoesNotExist:
+        return Response({'message': 'Service not found'}, status=status.HTTP_404_NOT_FOUND)
+    
+@api_view(['POST'])
+@permission_classes([IsVerifiedAndAuthenticated])
+def complete_service(request):
+    service_id = request.data.get('service_id')
+    if not service_id:
+        return Response({'message': 'Service ID is required'}, status=status.HTTP_400_BAD_REQUEST)
+    try:
+        service = Service.objects.get(id=service_id)
+        if service.customer == request.user:
+            service.completion_verification_from_customer = True
+        elif service.service_provider == request.user:
+            service.completion_verification_from_provider = True
+        else:
+            return Response({'message': 'Unauthorized access to complete service'}, status=status.HTTP_403_FORBIDDEN)
+        service.save()
+        return Response({'message': 'Service marked as completed'}, status=status.HTTP_200_OK)
+    except Service.DoesNotExist:
+        return Response({'message': 'Service not found'}, status=status.HTTP_404_NOT_FOUND)
+
+@api_view(['POST'])
+@permission_classes([IsVerifiedAndAuthenticated])
+def request_service(request):
+    customer_id = request.data.get('customer_id')
+    provider_id = request.data.get('provider_id')
+    description = request.data.get('description')
+    requested_date = request.data.get('requested_date') 
+    
+    if not all([customer_id, provider_id, description]):
+        return Response({'message': 'Customer ID, Provider ID and Description are required'}, status=status.HTTP_400_BAD_REQUEST)
+    
+    try:
+        customer = NewUser.objects.get(id=customer_id, role=NewUser.CUSTOMER)
+        provider = NewUser.objects.get(id=provider_id, role=NewUser.SERVICE_PROVIDER)
+         
+        service_request = ServiceRequest.objects.create(
+            customer=customer,
+            service_provider=provider,
+            description=description,
+            requested_on=requested_date if requested_date else timezone.now()
+        )
+        return Response({'message': 'Service requested successfully', 'service_id': str(service_request.id)}, status=status.HTTP_201_CREATED)
+    except NewUser.DoesNotExist:
+        return Response({'message': 'Customer or Service Provider not found'}, status=status.HTTP_404_NOT_FOUND)
+
+@api_view(['POST'])
+@permission_classes([IsVerifiedAndAuthenticated])
+def accept_service_request(request):
+    service_request_id = request.data.get('service_request_id')
+    if not service_request_id:
+        return Response({'message': 'Service Request ID is required'}, status=status.HTTP_400_BAD_REQUEST)
+    try:
+        service_request = ServiceRequest.objects.get(id=service_request_id, service_provider=request.user)
+        service_request.service_acceptance = True
+        service_request.status = "ACCEPTED"
+        Service.objects.create(
+            customer=service_request.customer,
+            service_provider=service_request.service_provider,
+            description=service_request.description,
+            requested_on=service_request.requested_on
+        )
+        service_request.save()
+        return Response({'message': 'Service request accepted'}, status=status.HTTP_200_OK)
+    except ServiceRequest.DoesNotExist:
+        return Response({'message': 'Service request not found or unauthorized'}, status=status.HTTP_404_NOT_FOUND)
+
+@api_view(['POST'])
+@permission_classes([IsVerifiedAndAuthenticated])
+def reject_service_request(request):
+    service_request_id = request.data.get('service_request_id')
+    if not service_request_id:
+        return Response({'message': 'Service Request ID is required'}, status=status.HTTP_400_BAD_REQUEST)
+    try:
+        service_request = ServiceRequest.objects.get(id=service_request_id, service_provider=request.user)
+        service_request.service_acceptance = False
+        service_request.status = "REJECTED"
+        service_request.save()
+        return Response({'message': 'Service request rejected'}, status=status.HTTP_200_OK)
+    except ServiceRequest.DoesNotExist:
+        return Response({'message': 'Service request not found or unauthorized'}, status=status.HTTP_404_NOT_FOUND)
 ################################### SARVAM VIEWS ###################################
 @permission_classes([IsVerifiedAndAuthenticated])
 @api_view(['POST'])
