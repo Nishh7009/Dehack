@@ -5,6 +5,7 @@ from .permissions import IsVerifiedAndAuthenticated
 from django.contrib.auth import login
 from .models import ROLES, NewUser, Service, ServiceRequest, ServiceProviderProfile
 from rest_framework.response import Response
+from django.core.mail import send_mail
 from rest_framework import status
 from pyotp import TOTP
 from django.utils import timezone
@@ -13,6 +14,8 @@ from django.contrib.gis.measure import D
 from django.contrib.gis.geos import Point
 import tempfile
 import os
+
+
 #################################### AUTH VIEWS ####################################
 @api_view(['POST'])
 @permission_classes([AllowAny])
@@ -22,6 +25,13 @@ def register(request):
         user = serializer.save()
         user.totp_secret = TOTP.generate_secret()
         login(request, user)
+        send_mail(
+            subject="Your OTP for Nivas Saarthi Registration",
+            message=f"Your OTP code is: {TOTP(user.totp_secret).now()}\nThis code will expire in 30 seconds.",
+            from_email=os.getenv('EMAIL_SENDER_ID'),
+            recipient_list=[user.email],
+            fail_silently=False,
+        )
         user.save()
         return Response({"message": "User registered successfully"}, status=status.HTTP_201_CREATED)
     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
@@ -32,6 +42,10 @@ def verify_totp(request):
     totp_code = request.data.get('totp_code')
     try:
         user = request.user
+        if user.otp_retries <= 0:
+            user.otp_retries = 3
+            user.save()
+            return Response({"error": "Maximum OTP retries exceeded"}, status=status.HTTP_400_BAD_REQUEST)
         totp = TOTP(user.totp_secret)
         if totp.verify(totp_code):
             user.is_verified = True
@@ -40,6 +54,66 @@ def verify_totp(request):
             return Response({"message": "TOTP verified successfully"}, status=status.HTTP_200_OK)
         else:
             user.otp_retries -= 1
+            send_mail(
+                subject="Your OTP for Nivas Saarthi Registration - Retry",
+                message=f"Your OTP code is: {TOTP(user.totp_secret).now()}\nThis code will expire in 30 seconds.\nYou have {user.otp_retries} retries left.",
+                from_email=os.getenv('EMAIL_SENDER_ID'),
+                recipient_list=[user.email],
+                fail_silently=False,
+            )
+            user.save()
+            return Response({"error": "Invalid OTP code, Another OTP has been sent to your email"}, status=status.HTTP_400_BAD_REQUEST)
+    except NewUser.DoesNotExist:
+        return Response({"error": "User not found"}, status=status.HTTP_404_NOT_FOUND)
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def forgot_password(request):
+    email = request.data.get('email')
+    try:
+        user = NewUser.objects.get(email=email)
+        user.totp_secret = TOTP.generate_secret()
+        user.otp_retries = 3 
+        user.save()
+        send_mail(
+            subject="Your OTP for Nivas Saarthi Password Reset",
+            message=f"Your OTP code is: {TOTP(user.totp_secret).now()}\nThis code will expire in 30 seconds.",
+            from_email=os.getenv('EMAIL_SENDER_ID'),
+            recipient_list=[user.email],
+            fail_silently=False,
+        )
+        return Response({"message": "Password reset OTP sent to email"}, status=status.HTTP_200_OK)
+    except NewUser.DoesNotExist:
+        return Response({"error": "User not found"}, status=status.HTTP_404_NOT_FOUND)
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def reset_password(request):
+    try:
+        email = request.data.get('email')
+        totp_code = request.data.get('totp_code')
+        new_password = request.data.get('new_password')
+        user = NewUser.objects.get(email=email)
+        totp = TOTP(user.totp_secret)
+        if user.otp_retries <= 0:
+            user.otp_retries = 3
+            user.save()
+            return Response({"error": "Maximum OTP retries exceeded"}, status=status.HTTP_400_BAD_REQUEST)
+        if totp.verify(totp_code):
+            user.set_password(new_password)
+            user.totp_secret = None
+            user.otp_retries = 3 
+            user.save()
+            return Response({"message": "Password reset successfully"}, status=status.HTTP_200_OK)
+        else:
+            user.otp_retries -= 1
+            send_mail(
+                subject="Your OTP for Nivas Saarthi Password Reset - Retry",
+                message=f"Your OTP code is: {TOTP(user.totp_secret).now()}\nThis code will expire in 30 seconds.\nYou have {user.otp_retries} retries left.",
+                from_email=os.getenv('EMAIL_SENDER_ID'),
+                recipient_list=[user.email],
+                fail_silently=False,
+            )
             user.save()
             return Response({"error": "Invalid OTP code"}, status=status.HTTP_400_BAD_REQUEST)
     except NewUser.DoesNotExist:
@@ -54,6 +128,13 @@ def resend_totp(request):
             user.totp_secret = TOTP.generate_secret()
             user.otp_retries -= 1
             user.save()
+            send_mail(
+                subject="Your OTP for Nivas Saarthi Registration - Resent",
+                message=f"Your OTP code is: {TOTP(user.totp_secret).now()}\nThis code will expire in 30 seconds.\nYou have {user.otp_retries} retries left.",
+                from_email=os.getenv('EMAIL_SENDER_ID'),
+                recipient_list=[user.email],
+                fail_silently=False,
+            )
             return Response({"message": "TOTP resent successfully"}, status=status.HTTP_200_OK)
         else:
             return Response({"error": "Maximum OTP retries exceeded"}, status=status.HTTP_400_BAD_REQUEST)
