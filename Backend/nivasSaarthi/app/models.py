@@ -1,13 +1,19 @@
 from django.db import models
 from django.contrib.auth.models import AbstractBaseUser
+from django.contrib.gis.db import models as gis_models
+from django.contrib.gis.geos import Point
 import uuid
 from django.core.validators import MinValueValidator, MaxValueValidator
 from django.utils import timezone
 
+class ROLES:
+    CUSTOMER = 'customer'
+    SERVICE_PROVIDER = 'service_provider'
+
 class NewUser(AbstractBaseUser):
     USER_ROLES = (
-    ("CUSTOMER", "Customer"),
-    ("SERVICE_PROVIDER", "Service Provider"),
+    (ROLES.CUSTOMER, "Customer"),
+    (ROLES.SERVICE_PROVIDER, "Service Provider"),
     )
 
     INDIAN_LANGUAGES = (
@@ -59,6 +65,15 @@ class NewUser(AbstractBaseUser):
     longitude = models.DecimalField(
         max_digits=9, decimal_places=6, blank=True, null=True
     )
+    
+    # Geospatial location field for PostGIS queries
+    location = gis_models.PointField(
+        geography=True,  # Use geography for accurate distance calculations in meters
+        null=True,
+        blank=True,
+        srid=4326,  # WGS84 coordinate system (standard for GPS)
+        help_text="Geographic location stored as Point(longitude, latitude)"
+    )
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -68,6 +83,13 @@ class NewUser(AbstractBaseUser):
     otp_retries = models.IntegerField(default=3)
     totp_secret = models.CharField(max_length=16, blank=True, null=True)
     profile_completed = models.BooleanField(default=False)
+    
+    def save(self, *args, **kwargs):
+        # Auto-populate location PointField from latitude/longitude
+        if self.latitude is not None and self.longitude is not None:
+            self.location = Point(float(self.longitude), float(self.latitude), srid=4326)
+        super().save(*args, **kwargs)
+    
     def __str__(self):
         return f"{self.phone_number} ({self.role})"
 
@@ -96,7 +118,7 @@ class ServiceProviderProfile(models.Model):
     def get_services_list(self):
         return [service.strip() for service in self.services.split(',') if service.strip()]
     def save(self, *args, **kwargs):
-        if self.user.role != Role.SERVICE_PROVIDER:
+        if self.user.role != ROLE.SERVICE_PROVIDER:
             raise ValueError("User must have role SERVICE_PROVIDER to have a ServiceProviderProfile")
         super().save(*args, **kwargs)
 

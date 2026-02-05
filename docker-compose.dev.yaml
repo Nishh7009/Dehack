@@ -12,7 +12,7 @@ services:
     restart: unless-stopped
 
   db:
-    image: postgis:15
+    image: postgis/postgis:15-3.4
     container_name: nivas_saarthi_db_dev
     volumes:
       - postgres_data_dev:/var/lib/postgresql/data/
@@ -21,7 +21,7 @@ services:
       - POSTGRES_PASSWORD=postgres
       - POSTGRES_DB=nivas_saarthi_dev
     ports:
-      - "5436:5432"  # Exposed for development access
+      - "5436:5432" # Exposed for development access
     networks:
       - app-network
     restart: unless-stopped
@@ -33,11 +33,11 @@ services:
     container_name: nivas_saarthi_web_dev
     command: python manage.py runserver 0.0.0.0:8000
     volumes:
-      - ./Backend:/home/app/web  # Mount source code for hot reload
+      - ./Backend:/home/app/web # Mount source code for hot reload
       - static_volume_dev:/home/app/web/staticfiles
       - media_volume_dev:/home/app/web/media
     ports:
-      - "8000:8000"  # Exposed for direct access
+      - "8000:8000" # Exposed for direct access
     env_file:
       - ./Backend/.env.dev
     environment:
@@ -50,7 +50,6 @@ services:
     networks:
       - app-network
     restart: unless-stopped
- 
   # Comment this out if not needed at the time or smthn
   # frontend:
   #   build:
@@ -80,6 +79,7 @@ volumes:
   postgres_data_dev:
   static_volume_dev:
   media_volume_dev:
+
 
 networks:
   app-network:

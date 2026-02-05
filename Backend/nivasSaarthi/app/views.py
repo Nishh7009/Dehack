@@ -3,11 +3,14 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from .permissions import IsVerifiedAndAuthenticated
 from django.contrib.auth import login
-from .models import NewUser, Service, ServiceRequest, ServiceProviderProfile
+from .models import ROLES, NewUser, Service, ServiceRequest, ServiceProviderProfile
 from rest_framework.response import Response
 from rest_framework import status
 from pyotp import TOTP
 from django.utils import timezone
+from django.contrib.gis.db.models.functions import Distance
+from django.contrib.gis.measure import D
+from django.contrib.gis.geos import Point
 import tempfile
 import os
 #################################### AUTH VIEWS ####################################
@@ -76,7 +79,7 @@ def get_services_for_provider(request):
     if not provider_id:
         return Response({'message': 'Provider ID is required'}, status=status.HTTP_400_BAD_REQUEST)
     try:
-        provider = NewUser.objects.get(id=provider_id, role=NewUser.SERVICE_PROVIDER)
+        provider = NewUser.objects.get(id=provider_id, role=ROLES.SERVICE_PROVIDER)
         if provider != request.user:
             return Response({'message': 'Unauthorized access to services'}, status=status.HTTP_403_FORBIDDEN)
         provider_profile = ServiceProviderProfile.objects.get(user=provider)
@@ -97,7 +100,7 @@ def get_services_for_provider(request):
 def get_incoming_requests(request):
     try:
         provider = request.user
-        if provider.role != NewUser.SERVICE_PROVIDER:
+        if provider.role != ROLES.SERVICE_PROVIDER:
             return Response({'message': 'Only service providers can view incoming requests'}, status=status.HTTP_403_FORBIDDEN)
         service_requests = ServiceRequest.objects.filter(service_provider=provider, status='PENDING').order_by('-requested_on')
         requests_data = [{
@@ -115,7 +118,7 @@ def get_incoming_requests(request):
 def get_outgoing_requests(request):
     try:
         customer = request.user
-        if customer.role != NewUser.CUSTOMER:
+        if customer.role != ROLES.CUSTOMER:
             return Response({'message': 'Only customers can view outgoing requests'}, status=status.HTTP_403_FORBIDDEN)
         service_requests = ServiceRequest.objects.filter(customer=customer).order_by('-requested_on')
         requests_data = [{
@@ -136,7 +139,7 @@ def get_services_for_customer(request):
     if not customer_id:
         return Response({'message': 'Customer ID is required'}, status=status.HTTP_400_BAD_REQUEST)
     try:
-        customer = NewUser.objects.get(id=customer_id, role=NewUser.CUSTOMER)
+        customer = NewUser.objects.get(id=customer_id, role=ROLES.CUSTOMER)
         if customer != request.user:
             return Response({'message': 'Unauthorized access to services'}, status=status.HTTP_403_FORBIDDEN)
         services = Service.objects.filter(customer=customer).order_by('-requested_on')
@@ -157,9 +160,9 @@ def get_service_details(request):
         service_id = request.query_params.get('service_id')
         if not service_id:
             return Response({'message': 'Service ID is required'}, status=status.HTTP_400_BAD_REQUEST)
-        if request.user.role == NewUser.SERVICE_PROVIDER:
+        if request.user.role == ROLES.SERVICE_PROVIDER:
             service = Service.objects.get(id=service_id, service_provider=request.user)
-        elif request.user.role == NewUser.CUSTOMER:
+        else:
             service = Service.objects.get(id=service_id, customer=request.user)
         if service is None:
             return Response({'message': 'Unauthorized access to service details'}, status=status.HTTP_403_FORBIDDEN)
@@ -199,14 +202,40 @@ def request_service(request):
     customer_id = request.data.get('customer_id')
     provider_id = request.data.get('provider_id')
     description = request.data.get('description')
-    requested_date = request.data.get('requested_date') 
+    requested_date = request.data.get('requested_date')
+    
+    # Location where the customer wants the service (required for distance validation)
+    service_latitude = request.data.get('service_latitude')
+    service_longitude = request.data.get('service_longitude')
     
     if not all([customer_id, provider_id, description]):
         return Response({'message': 'Customer ID, Provider ID and Description are required'}, status=status.HTTP_400_BAD_REQUEST)
     
     try:
-        customer = NewUser.objects.get(id=customer_id, role=NewUser.CUSTOMER)
-        provider = NewUser.objects.get(id=provider_id, role=NewUser.SERVICE_PROVIDER)
+        customer = NewUser.objects.get(id=customer_id, role=ROLES.CUSTOMER)
+        provider = NewUser.objects.get(id=provider_id, role=ROLES.SERVICE_PROVIDER)
+        
+        # Validate distance if location is provided
+        if service_latitude and service_longitude and provider.location:
+            service_location = Point(float(service_longitude), float(service_latitude), srid=4326)
+            # Calculate distance in kilometers
+            distance_m = provider.location.distance(service_location)
+            # Convert to km (geography type returns distance in meters)
+            distance_km = distance_m * 100  # Approximate conversion for geography
+            
+            # Use proper distance calculation with geodesic
+            from django.contrib.gis.db.models.functions import Distance as GeoDistance
+            provider_with_dist = NewUser.objects.filter(id=provider_id).annotate(
+                distance=GeoDistance('location', service_location)
+            ).first()
+            
+            if provider_with_dist and provider_with_dist.distance:
+                distance_km = provider_with_dist.distance.km
+                if distance_km > 5:
+                    return Response({
+                        'message': f'Provider is {distance_km:.1f}km away from the service location. Maximum allowed distance is 5km.',
+                        'distance_km': round(distance_km, 2)
+                    }, status=status.HTTP_400_BAD_REQUEST)
          
         service_request = ServiceRequest.objects.create(
             customer=customer,
@@ -214,7 +243,7 @@ def request_service(request):
             description=description,
             requested_on=requested_date if requested_date else timezone.now()
         )
-        return Response({'message': 'Service requested successfully', 'service_id': str(service_request.id)}, status=status.HTTP_201_CREATED)
+        return Response({'message': 'Service requested successfully', 'service_request_id': str(service_request.id)}, status=status.HTTP_201_CREATED)
     except NewUser.DoesNotExist:
         return Response({'message': 'Customer or Service Provider not found'}, status=status.HTTP_404_NOT_FOUND)
 
@@ -253,6 +282,100 @@ def reject_service_request(request):
         return Response({'message': 'Service request rejected'}, status=status.HTTP_200_OK)
     except ServiceRequest.DoesNotExist:
         return Response({'message': 'Service request not found or unauthorized'}, status=status.HTTP_404_NOT_FOUND)
+
+@api_view(['GET'])
+@permission_classes([IsVerifiedAndAuthenticated])
+def get_nearby_providers(request):
+    """
+    Get service providers within a radius of a given location.
+    
+    Query params:
+    - latitude: Required. Latitude of the location to search from.
+    - longitude: Required. Longitude of the location to search from.
+    - radius_km: Optional. Search radius in kilometers (default: 5).
+    - service_type: Optional. Filter by service type (comma-separated list).
+    
+    Returns:
+    - providers: List of nearby providers with distance information.
+    - count: Total number of providers found.
+    """
+    lat = request.query_params.get('latitude')
+    lon = request.query_params.get('longitude')
+    radius_km = float(request.query_params.get('radius_km', 5))
+    service_type = request.query_params.get('service_type')
+    
+    # Validate required parameters
+    if not lat or not lon:
+        return Response(
+            {'message': 'Latitude and longitude are required query parameters.'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+    
+    try:
+        user_location = Point(float(lon), float(lat), srid=4326)
+    except (ValueError, TypeError):
+        return Response(
+            {'message': 'Invalid latitude or longitude values.'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+    
+    # Query providers within radius using PostGIS
+    providers = NewUser.objects.filter(
+        role=ROLES.SERVICE_PROVIDER,
+        location__isnull=False,
+        location__distance_lte=(user_location, D(km=radius_km))
+    ).annotate(
+        distance=Distance('location', user_location)
+    ).select_related('service_provider_profile').order_by('distance')
+    
+    # Filter by service type if specified
+    if service_type:
+        service_types = [s.strip().lower() for s in service_type.split(',')]
+        filtered_providers = []
+        for p in providers:
+            if hasattr(p, 'service_provider_profile'):
+                provider_services = [s.lower() for s in p.service_provider_profile.get_services_list()]
+                if any(st in provider_services for st in service_types):
+                    filtered_providers.append(p)
+        providers = filtered_providers
+    
+    providers_data = []
+    for p in providers:
+        provider_data = {
+            'id': str(p.id),
+            'first_name': p.first_name,
+            'last_name': p.last_name,
+            'phone_number': p.phone_number,
+            'city': p.city,
+            'distance_km': round(p.distance.km, 2) if hasattr(p, 'distance') and p.distance else None,
+        }
+        
+        # Add service provider profile data if available
+        if hasattr(p, 'service_provider_profile'):
+            profile = p.service_provider_profile
+            provider_data.update({
+                'average_rating': profile.average_rating,
+                'years_of_experience': profile.years_of_experience,
+                'services': profile.get_services_list(),
+                'bio': profile.bio,
+            })
+        else:
+            provider_data.update({
+                'average_rating': 0,
+                'years_of_experience': 0,
+                'services': [],
+                'bio': '',
+            })
+        
+        providers_data.append(provider_data)
+    
+    return Response({
+        'providers': providers_data,
+        'count': len(providers_data),
+        'search_radius_km': radius_km,
+        'search_location': {'latitude': lat, 'longitude': lon}
+    }, status=status.HTTP_200_OK)
+
 ################################### SARVAM VIEWS ###################################
 @permission_classes([IsVerifiedAndAuthenticated])
 @api_view(['POST'])
