@@ -34,4 +34,6 @@ COPY . $APP_HOME
 #
 # USER app
 
+RUN sed -i 's/\r$//g' $APP_HOME/entrypoint.sh
+
 ENTRYPOINT ["/home/app/web/entrypoint.sh"]

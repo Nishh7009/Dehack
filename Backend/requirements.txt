@@ -19,9 +19,11 @@ cryptography==46.0.4
 daphne==4.2.1
 Django==6.0.2
 django-redis==6.0.0
+django-silk==5.4.3
 djangorestframework==3.16.1
 djangorestframework_simplejwt==5.4.0
 frozenlist==1.8.0
+gprof2dot==2025.4.14
 h11==0.16.0
 httpcore==1.0.9
 httpx==0.28.1
