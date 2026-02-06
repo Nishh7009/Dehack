@@ -11,11 +11,10 @@ echo "PostgreSQL started"
 
 cd nivasSaarthi
 
-# remove previous migration files but keep __init__.py
 # find . -path "*/migrations/*.py" -not -name "__init__.py" -type f -delete || true
 # find . -path "*/migrations/*.pyc" -type f -delete || true
 # find . -path "*/migrations/__pycache__" -prune -exec rm -rf {} + 2>/dev/null || true
-python manage.py flush --no-input
+# NOTE: Removed 'flush --no-input' - it was deleting all data on every restart!
 python manage.py makemigrations
 python manage.py migrate
 

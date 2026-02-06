@@ -1,8 +1,11 @@
+from django.http import HttpResponse
+from app.utils import call_helpers
+from app import twilio_service
 from .serializers import UserRegistrationSerializer, UserBaseRegistrationSerializer
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from .permissions import IsVerifiedAndAuthenticated
-from django.contrib.auth import login, logout
+from rest_framework_simplejwt.tokens import RefreshToken
 from .models import ROLES, NewUser, Service, ServiceRequest, ServiceProviderProfile, Notifications, SOSRequest, Blacklist, EmergencyContact, VoiceCall, CallTranscript, WebhookSubscription
 from rest_framework.response import Response
 from django.core.mail import send_mail
@@ -50,6 +53,9 @@ def register(request):
 @permission_classes([AllowAny])
 def verify_totp(request):
     totp_code = request.data.get('totp_code')
+    # Ensure totp_code is a string and zero-padded to 6 digits
+    if totp_code is not None:
+        totp_code = str(totp_code).zfill(6)
     user_id = request.data.get('user_id')
     try:
         user = NewUser.objects.get(id=user_id)
@@ -58,19 +64,25 @@ def verify_totp(request):
             user.delete()
             return Response({"error": "Maximum OTP retries exceeded"}, status=status.HTTP_400_BAD_REQUEST)
         totp = pyotp.TOTP(user.totp_secret)
-        if totp.verify(totp_code):
+        # valid_window=2 allows codes from 2 time windows before/after (±60 seconds)
+        if totp.verify(totp_code, valid_window=2):
             user.is_verified = True
             user.is_active = True  # Make sure this is set!
             user.otp_retries = 3
             user.save()
-            login(request, user)
+            # Generate JWT tokens
+            refresh = RefreshToken.for_user(user)
             Notifications.objects.create(
                 user=user,
                 title="Welcome to Nivas Saarthi",
                 message="Your account has been successfully verified.",
-                notification_type="info"
+                notification_type = 'info'
             )
-            return Response({"message": "TOTP verified successfully"}, status=status.HTTP_200_OK)
+            return Response({
+                "message": "TOTP verified successfully",
+                "access": str(refresh.access_token),
+                "refresh": str(refresh)
+            }, status=status.HTTP_200_OK)
         else:
             user.otp_retries -= 1
             send_mail(
@@ -106,7 +118,7 @@ def forgot_password(request):
 
 @api_view(['POST'])
 @permission_classes([AllowAny])
-def login(request):
+def login_view(request):
     email = request.data.get('email')
     password = request.data.get('password')
     try:
@@ -114,8 +126,13 @@ def login(request):
         if not user.is_verified:
             return Response({"error": "Email not verified"}, status=status.HTTP_403_FORBIDDEN)
         if user.check_password(password):
-            login(request, user)
-            return Response({"message": "Login successful"}, status=status.HTTP_200_OK)
+            # Generate JWT tokens
+            refresh = RefreshToken.for_user(user)
+            return Response({
+                "message": "Login successful",
+                "access": str(refresh.access_token),
+                "refresh": str(refresh)
+            }, status=status.HTTP_200_OK)
         else:
             return Response({"error": "Invalid credentials"}, status=status.HTTP_401_UNAUTHORIZED)
     except NewUser.DoesNotExist:
@@ -129,9 +146,9 @@ def user_session_details(request):
 
 @api_view(['POST'])
 @permission_classes([IsVerifiedAndAuthenticated])
-def logout(request):
-    request.session.flush()
-    logout(request)
+def logout_view(request):
+    # JWT is stateless - just return success
+    # Client should discard the tokens
     return Response({"message": "Logged out successfully"}, status=status.HTTP_200_OK)
 
 @api_view(['POST'])
@@ -140,6 +157,9 @@ def reset_password(request):
     try:
         email = request.data.get('email')
         totp_code = request.data.get('totp_code')
+        # Ensure totp_code is a string and zero-padded to 6 digits
+        if totp_code is not None:
+            totp_code = str(totp_code).zfill(6)
         new_password = request.data.get('new_password')
         user = NewUser.objects.get(email=email)
         totp = pyotp.TOTP(user.totp_secret)
@@ -147,7 +167,8 @@ def reset_password(request):
             user.otp_retries = 3
             user.save()
             return Response({"error": "Maximum OTP retries exceeded"}, status=status.HTTP_400_BAD_REQUEST)
-        if totp.verify(totp_code):
+        # valid_window=2 allows codes from 2 time windows before/after (±60 seconds)
+        if totp.verify(totp_code, valid_window=2):
             user.set_password(new_password)
             user.totp_secret = None
             user.otp_retries = 3 
@@ -170,7 +191,7 @@ def reset_password(request):
 @api_view(['GET'])
 @permission_classes([AllowAny])
 def resend_totp(request):
-    user_id = request.query_params.get('user_id')
+    user_id = request.data.get('user_id')
     try:
         user = NewUser.objects.get(id=user_id)
         if user.otp_retries > 0:
@@ -218,7 +239,7 @@ def get_services_for_provider(request):
             'customer': service.customer.first_name + " " + service.customer.last_name,
             'description': service.description,
             'requested_on': service.requested_on,
-            'completed': service.completed
+            'completed': (service.service_status == 'COMPLETED')
         } for service in services]
         return Response({'services': services_data}, status=status.HTTP_200_OK)
     except NewUser.DoesNotExist:
@@ -545,7 +566,7 @@ def get_notifications(request):
         'id': str(notification.id),
         'message': notification.message,
         'created_at': notification.created_at,
-        'read': notification.read
+        'read': notification.is_read
     } for notification in notifications]
     return Response({'notifications': notifications_data}, status=status.HTTP_200_OK)
 
@@ -554,7 +575,7 @@ def get_notifications(request):
 def mark_notification_as_read(request, notification_id):
     try:
         notification = Notifications.objects.get(id=notification_id, user=request.user)
-        notification.read = True
+        notification.is_read = True
         notification.save()
         return Response({'message': 'Notification marked as read'}, status=status.HTTP_200_OK)
     except Notifications.DoesNotExist:
@@ -563,13 +584,13 @@ def mark_notification_as_read(request, notification_id):
 @api_view(['GET'])
 @permission_classes([IsVerifiedAndAuthenticated])
 def get_unread_notification_count(request):
-    unread_count = Notifications.objects.filter(user=request.user, read=False).count()
+    unread_count = Notifications.objects.filter(user=request.user, is_read=False).count()
     return Response({'unread_count': unread_count}, status=status.HTTP_200_OK)
 
 @api_view(['POST'])
 @permission_classes([IsVerifiedAndAuthenticated])
 def mark_all_notifications_as_read(request):
-    Notifications.objects.filter(user=request.user, read=False).update(read=True)
+    Notifications.objects.filter(user=request.user, is_read=False).update(is_read=True)
     return Response({'message': 'All notifications marked as read'}, status=status.HTTP_200_OK)
 
 
@@ -590,7 +611,7 @@ def report_emergency(request, service_id):
             latitude=location.y,
             culprit = NewUser.objects.get(id=Service.objects.get(id=service_id).service_provider.id)
         )
-        blacklist = Blacklist.objects.filter(user=emergency.culprit)
+        Blacklist.objects.create(blocked_user=emergency.culprit, user=user)
         emergency.save()
         emergency_contacts = EmergencyContact.objects.filter(user=user)
         for contact in emergency_contacts:
@@ -601,11 +622,11 @@ def report_emergency(request, service_id):
             
             if twilio_account_sid and twilio_auth_token and twilio_phone:
                 try:
-                    client = Client(twilio_account_sid, twilio_auth_token)
+                    client = twilio_service.get_twilio_client()
                     message = client.messages.create(
                         body=f"Emergency Alert! {user.first_name} {user.last_name} has reported an emergency.\nLocation: https://www.google.com/maps/search/?api=1&query={latitude},{longitude}\nTime: {emergency.reported_on.strftime('%Y-%m-%d %H:%M:%S')}",
                         from_=twilio_phone,
-                        to=contact.contact_phone_number
+                        to=contact.phone_number
                     )
                 except Exception as e:
                     print(f"SMS sending failed: {str(e)}")
@@ -618,7 +639,7 @@ def report_emergency(request, service_id):
             'event': 'emergency_reported',
             'latitude': latitude,
             'longitude': longitude,
-            'reported_on': emergency.reported_on.strftime("%Y-%m-%d %H:%S")
+            'reported_on': emergency.requested_on.strftime("%Y-%m-%d %H:%S")
         })
         notification.save()
         return Response({'message': 'Emergency reported successfully'}, status=status.HTTP_201_CREATED)

@@ -120,7 +120,7 @@ class ServiceProviderProfile(models.Model):
     def get_services_list(self):
         return [service.strip() for service in self.services.split(',') if service.strip()]
     def save(self, *args, **kwargs):
-        if self.user.role != ROLE.SERVICE_PROVIDER:
+        if self.user.role != ROLES.SERVICE_PROVIDER:
             raise ValueError("User must have role SERVICE_PROVIDER to have a ServiceProviderProfile")
         super().save(*args, **kwargs)
 
@@ -220,10 +220,12 @@ class ChatMessage(models.Model):
 class Notifications(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     user = models.ForeignKey(NewUser, on_delete=models.CASCADE, related_name='notifications')
+    title = models.CharField(max_length=100, null=True, blank=True)
     message = models.TextField()
     is_read = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+    notification_type = models.CharField(max_length=50, null=True, blank=True)
 
     def form_message(self, context):
         # Form the message based on the context provided. Context can be a dictionary containing relevant information about the event that triggered the notification.
