@@ -275,3 +275,18 @@ class EmergencyContact(models.Model):
 
     def __str__(self):
         return f"Emergency Contact {self.name} for {self.user}"
+
+class WebhookSubscription(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(NewUser, on_delete=models.CASCADE, related_name='webhook_subscriptions')
+    url = models.URLField(help_text="URL to send webhook notifications")
+    event_type = models.CharField(max_length=50, default='notification_count')  # notification_count, new_message, etc.
+    is_active = models.BooleanField(default=True)
+    secret = models.CharField(max_length=64, blank=True)  # For webhook signature verification
+    created_at = models.DateTimeField(auto_now_add=True)
+    
+    def save(self, *args, **kwargs):
+        if not self.secret:
+            import secrets
+            self.secret = secrets.token_hex(32)
+        super().save(*args, **kwargs)

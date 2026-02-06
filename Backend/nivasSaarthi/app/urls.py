@@ -35,4 +35,8 @@ urlpatterns = [
     # SOS endpoints
     path('emergency/report/<uuid:service_id>/', views.report_emergency, name='report_emergency'),
     path('emergency/resolve/<uuid:emergency_id>/', views.resolve_emergency, name='resolve_emergency'),
+
+    # Webhook management endpoints
+    path('webhooks/register/', views.register_webhook, name='register_webhook'),
+    path('webhooks/<uuid:webhook_id>/', views.delete_webhook, name='delete_webhook'),
 ]
