@@ -1,5 +1,5 @@
 """
-Comprehensive tests for all API endpoints in views.py
+Comprehensive tests for all API endpoints in views.py and WebSocket consumers
 Run with: python manage.py test app.tests
 Or in Docker: docker exec nivas_saarthi_web_dev python nivasSaarthi/manage.py test app.tests
 """
@@ -9,16 +9,24 @@ from django.urls import reverse
 from rest_framework.test import APITestCase, APIClient
 from rest_framework import status
 from rest_framework_simplejwt.tokens import RefreshToken
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, AsyncMock
 from django.contrib.gis.geos import Point
 import pyotp
 import uuid
+import json
+import asyncio
+
+# Channels imports for WebSocket testing
+from channels.testing import WebsocketCommunicator
+from channels.db import database_sync_to_async
 
 from .models import (
     NewUser, ROLES, ServiceProviderProfile, Service, ServiceRequest,
     Notifications, SOSRequest, Blacklist, EmergencyContact,
-    WebhookSubscription, VoiceCall, CallTranscript, ChatSession
+    WebhookSubscription, VoiceCall, CallTranscript, ChatMessage
 )
+from .utils import call_helpers, chat_helpers
+from .consumers import TranslatedCallConsumer, TranslatedChatConsumer
 
 
 class BaseAPITestCase(APITestCase):
@@ -884,3 +892,350 @@ class SessionDetailsAPITest(BaseAPITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertIn('profile_completed', response.data)
         self.assertIn('is_verified', response.data)
+
+
+# ============================================================================
+# WEBSOCKET CONSUMER TESTS
+# ============================================================================
+
+class TranslatedCallConsumerTest(TestCase):
+    """Tests for TranslatedCallConsumer WebSocket."""
+    
+    def setUp(self):
+        """Set up test fixtures for call consumer tests."""
+        # Create caller user
+        self.caller = NewUser.objects.create(
+            username='caller_ws',
+            email='caller_ws@test.com',
+            phone_number='1111111111',
+            first_name='Caller',
+            middle_name='Test',
+            last_name='User',
+            role=ROLES.CUSTOMER,
+            is_active=True,
+            is_verified=True,
+            preferred_language='en',
+        )
+        
+        # Create receiver user
+        self.receiver = NewUser.objects.create(
+            username='receiver_ws',
+            email='receiver_ws@test.com',
+            phone_number='2222222222',
+            first_name='Receiver',
+            middle_name='Test',
+            last_name='User',
+            role=ROLES.SERVICE_PROVIDER,
+            is_active=True,
+            is_verified=True,
+            preferred_language='hi',
+        )
+        
+        # Create a voice call
+        self.voice_call = VoiceCall.objects.create(
+            caller=self.caller,
+            receiver=self.receiver,
+            caller_language='en',
+            receiver_language='hi',
+            status='initiated',
+        )
+    
+    def test_call_helpers_create_voice_call(self):
+        """Test creating a voice call via helpers."""
+        call = call_helpers.create_voice_call(self.caller, self.receiver)
+        
+        self.assertIsNotNone(call)
+        self.assertEqual(call.caller, self.caller)
+        self.assertEqual(call.receiver, self.receiver)
+        self.assertEqual(call.caller_language, 'en')
+        self.assertEqual(call.receiver_language, 'hi')
+        self.assertEqual(call.status, 'initiated')
+    
+    def test_call_helpers_get_call_data(self):
+        """Test getting call data for caller perspective."""
+        call_data = call_helpers.get_call_data(
+            self.voice_call.id,
+            str(self.caller.id)
+        )
+        
+        self.assertIsNotNone(call_data)
+        self.assertEqual(call_data['call'], self.voice_call)
+        self.assertEqual(call_data['user_language'], 'en')
+        self.assertEqual(call_data['other_language'], 'hi')
+    
+    def test_call_helpers_get_call_data_receiver_perspective(self):
+        """Test getting call data for receiver perspective."""
+        call_data = call_helpers.get_call_data(
+            self.voice_call.id,
+            str(self.receiver.id)
+        )
+        
+        self.assertIsNotNone(call_data)
+        self.assertEqual(call_data['user_language'], 'hi')
+        self.assertEqual(call_data['other_language'], 'en')
+    
+    def test_call_helpers_update_call_status(self):
+        """Test updating call status."""
+        call_helpers.update_call_status(
+            self.voice_call.id,
+            'ringing',
+            twilio_call_sid='TEST_SID_123'
+        )
+        
+        self.voice_call.refresh_from_db()
+        self.assertEqual(self.voice_call.status, 'ringing')
+        self.assertEqual(self.voice_call.twilio_call_sid, 'TEST_SID_123')
+    
+    def test_call_helpers_save_call_transcript(self):
+        """Test saving call transcript."""
+        transcript = call_helpers.save_call_transcript(
+            self.voice_call.id,
+            str(self.caller.id),
+            'Hello, how are you?',
+            'en',
+            'नमस्ते, आप कैसे हैं?',
+            'hi'
+        )
+        
+        self.assertIsNotNone(transcript)
+        self.assertEqual(transcript.original_text, 'Hello, how are you?')
+        self.assertEqual(transcript.translated_text, 'नमस्ते, आप कैसे हैं?')
+    
+    def test_call_helpers_get_call_transcripts(self):
+        """Test getting call transcripts."""
+        # Create some transcripts
+        call_helpers.save_call_transcript(
+            self.voice_call.id, str(self.caller.id),
+            'Hello', 'en', 'नमस्ते', 'hi'
+        )
+        call_helpers.save_call_transcript(
+            self.voice_call.id, str(self.receiver.id),
+            'नमस्ते', 'hi', 'Hello', 'en'
+        )
+        
+        transcripts = call_helpers.get_call_transcripts(self.voice_call.id)
+        
+        self.assertEqual(len(transcripts), 2)
+    
+    def test_call_helpers_end_call(self):
+        """Test ending a call."""
+        call = call_helpers.end_call(self.voice_call.id)
+        
+        self.assertIsNotNone(call)
+        self.assertEqual(call.status, 'completed')
+        self.assertIsNotNone(call.ended_at)
+
+
+class TranslatedChatConsumerTest(TestCase):
+    """Tests for TranslatedChatConsumer WebSocket and chat helpers."""
+    
+    def setUp(self):
+        """Set up test fixtures for chat consumer tests."""
+        # Create two users for chat
+        self.user1 = NewUser.objects.create(
+            username='chat_user1',
+            email='chat1@test.com',
+            phone_number='3333333333',
+            first_name='Chat',
+            middle_name='User',
+            last_name='One',
+            role=ROLES.CUSTOMER,
+            is_active=True,
+            is_verified=True,
+            preferred_language='en',
+        )
+        
+        self.user2 = NewUser.objects.create(
+            username='chat_user2',
+            email='chat2@test.com',
+            phone_number='4444444444',
+            first_name='Chat',
+            middle_name='User',
+            last_name='Two',
+            role=ROLES.SERVICE_PROVIDER,
+            is_active=True,
+            is_verified=True,
+            preferred_language='hi',
+        )
+    
+    def test_chat_helpers_get_chat_room_name(self):
+        """Test chat room name generation is consistent."""
+        room1 = chat_helpers.get_chat_room_name(self.user1.id, self.user2.id)
+        room2 = chat_helpers.get_chat_room_name(self.user2.id, self.user1.id)
+        
+        # Room names should be the same regardless of order
+        self.assertEqual(room1, room2)
+    
+    def test_chat_helpers_get_chat_users(self):
+        """Test getting chat users from room name."""
+        room_name = chat_helpers.get_chat_room_name(self.user1.id, self.user2.id)
+        chat_data = chat_helpers.get_chat_users(room_name, str(self.user1.id))
+        
+        self.assertIsNotNone(chat_data)
+        self.assertEqual(chat_data['user'], self.user1)
+        self.assertEqual(chat_data['other_user'], self.user2)
+        self.assertEqual(chat_data['user_language'], 'en')
+        self.assertEqual(chat_data['other_language'], 'hi')
+    
+    def test_chat_helpers_save_chat_message(self):
+        """Test saving a chat message."""
+        message = chat_helpers.save_chat_message(
+            str(self.user1.id),
+            str(self.user2.id),
+            'Hello there!',
+            'en',
+            'नमस्ते!',
+            'hi'
+        )
+        
+        self.assertIsNotNone(message)
+        self.assertEqual(message.sender, self.user1)
+        self.assertEqual(message.receiver, self.user2)
+        self.assertEqual(message.original_message, 'Hello there!')
+        self.assertEqual(message.translated_message, 'नमस्ते!')
+        self.assertFalse(message.is_read)
+    
+    def test_chat_helpers_get_chat_history(self):
+        """Test getting chat history."""
+        # Create some messages
+        chat_helpers.save_chat_message(
+            str(self.user1.id), str(self.user2.id),
+            'Hello', 'en', 'नमस्ते', 'hi'
+        )
+        chat_helpers.save_chat_message(
+            str(self.user2.id), str(self.user1.id),
+            'नमस्ते', 'hi', 'Hello', 'en'
+        )
+        chat_helpers.save_chat_message(
+            str(self.user1.id), str(self.user2.id),
+            'How are you?', 'en', 'आप कैसे हैं?', 'hi'
+        )
+        
+        history = chat_helpers.get_chat_history(str(self.user1.id), str(self.user2.id))
+        
+        self.assertEqual(len(history), 3)
+        # Should be in chronological order (oldest first)
+        self.assertEqual(history[0].original_message, 'Hello')
+        self.assertEqual(history[2].original_message, 'How are you?')
+    
+    def test_chat_helpers_mark_messages_as_read(self):
+        """Test marking messages as read."""
+        # Create unread messages from user2 to user1
+        chat_helpers.save_chat_message(
+            str(self.user2.id), str(self.user1.id),
+            'Message 1', 'hi', 'Message 1', 'en'
+        )
+        chat_helpers.save_chat_message(
+            str(self.user2.id), str(self.user1.id),
+            'Message 2', 'hi', 'Message 2', 'en'
+        )
+        
+        # Verify they're unread
+        unread_count = ChatMessage.objects.filter(
+            sender=self.user2, receiver=self.user1, is_read=False
+        ).count()
+        self.assertEqual(unread_count, 2)
+        
+        # Mark as read
+        chat_helpers.mark_messages_as_read(str(self.user1.id), str(self.user2.id))
+        
+        # Verify they're now read
+        unread_count = ChatMessage.objects.filter(
+            sender=self.user2, receiver=self.user1, is_read=False
+        ).count()
+        self.assertEqual(unread_count, 0)
+    
+    def test_chat_message_ordering(self):
+        """Test that messages are ordered by timestamp."""
+        import time
+        
+        msg1 = chat_helpers.save_chat_message(
+            str(self.user1.id), str(self.user2.id),
+            'First', 'en', 'पहला', 'hi'
+        )
+        time.sleep(0.01)  # Small delay to ensure different timestamps
+        msg2 = chat_helpers.save_chat_message(
+            str(self.user1.id), str(self.user2.id),
+            'Second', 'en', 'दूसरा', 'hi'
+        )
+        
+        self.assertLess(msg1.timestamp, msg2.timestamp)
+
+
+class ChatHelpersEdgeCasesTest(TestCase):
+    """Test edge cases for chat helpers."""
+    
+    def setUp(self):
+        """Set up test fixtures."""
+        self.user1 = NewUser.objects.create(
+            username='edge_user1',
+            email='edge1@test.com',
+            phone_number='5555555555',
+            first_name='Edge',
+            middle_name='Test',
+            last_name='User1',
+            role=ROLES.CUSTOMER,
+            is_active=True,
+            is_verified=True,
+            preferred_language='en',
+        )
+        self.user2 = NewUser.objects.create(
+            username='edge_user2',
+            email='edge2@test.com',
+            phone_number='6666666666',
+            first_name='Edge',
+            middle_name='Test',
+            last_name='User2',
+            role=ROLES.SERVICE_PROVIDER,
+            is_active=True,
+            is_verified=True,
+            preferred_language='en',  # Same language as user1
+        )
+    
+    def test_same_language_chat(self):
+        """Test chat between users with same language preference."""
+        chat_data = chat_helpers.get_chat_users(
+            chat_helpers.get_chat_room_name(self.user1.id, self.user2.id),
+            str(self.user1.id)
+        )
+        
+        # Both languages should be the same
+        self.assertEqual(chat_data['user_language'], chat_data['other_language'])
+    
+    def test_empty_chat_history(self):
+        """Test getting empty chat history."""
+        history = chat_helpers.get_chat_history(str(self.user1.id), str(self.user2.id))
+        
+        self.assertEqual(len(history), 0)
+    
+    def test_invalid_room_name(self):
+        """Test handling of invalid room name."""
+        result = chat_helpers.get_chat_users('invalid_room', str(self.user1.id))
+        
+        # Should return None for invalid room
+        self.assertIsNone(result)
+
+
+class CallHelpersEdgeCasesTest(TestCase):
+    """Test edge cases for call helpers."""
+    
+    def test_get_nonexistent_call(self):
+        """Test getting a call that doesn't exist."""
+        fake_id = uuid.uuid4()
+        call_data = call_helpers.get_call_data(fake_id, None)
+        
+        self.assertIsNone(call_data)
+    
+    def test_update_nonexistent_call(self):
+        """Test updating a call that doesn't exist."""
+        fake_id = uuid.uuid4()
+        result = call_helpers.update_call_status(fake_id, 'completed')
+        
+        self.assertIsNone(result)
+    
+    def test_get_call_by_id_nonexistent(self):
+        """Test getting a call by ID that doesn't exist."""
+        fake_id = uuid.uuid4()
+        call = call_helpers.get_call_by_id(fake_id)
+        
+        self.assertIsNone(call)

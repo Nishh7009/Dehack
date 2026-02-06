@@ -3,7 +3,7 @@ import base64
 import asyncio
 from channels.generic.websocket import AsyncWebsocketConsumer
 from channels.db import database_sync_to_async
-import sarvam_service
+from app import sarvam_service
 from app.utils import call_helpers
 
 class TranslatedCallConsumer(AsyncWebsocketConsumer):
@@ -130,7 +130,7 @@ import json
 import asyncio
 from channels.generic.websocket import AsyncWebsocketConsumer
 from channels.db import database_sync_to_async
-from app.services import sarvam_service
+from app import sarvam_service
 from app.utils import chat_helpers
 
 class TranslatedChatConsumer(AsyncWebsocketConsumer):

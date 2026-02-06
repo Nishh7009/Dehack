@@ -20,10 +20,11 @@ class EmergencyContactInline(admin.TabularInline):
     extra = 0
 
 
-class ChatMessageInline(admin.TabularInline):
-    model = ChatMessage
-    extra = 0
-    readonly_fields = ('id', 'sender', 'message', 'timestamp', 'created_at')
+# class ChatMessageInline(admin.TabularInline):
+#     model = ChatMessage
+#     extra = 0
+#     readonly_fields = ('id', 'sender', 'receiver', 'original_message', 'translated_message', 'timestamp', 'is_read')
+#     fk_name = 'sender'
 
 
 class ServiceRatingInline(admin.StackedInline):
@@ -134,21 +135,37 @@ class ChatSessionAdmin(admin.ModelAdmin):
     readonly_fields = ('id', 'created_at', 'updated_at', 'session_started_on')
     raw_id_fields = ('user',)
     date_hierarchy = 'session_started_on'
-    inlines = [ChatMessageInline]
 
 
 @admin.register(ChatMessage)
 class ChatMessageAdmin(admin.ModelAdmin):
-    list_display = ('id', 'chat_session', 'sender', 'message_preview', 'timestamp')
-    list_filter = ('timestamp',)
-    search_fields = ('sender__phone_number', 'message')
-    readonly_fields = ('id', 'created_at', 'updated_at', 'timestamp')
-    raw_id_fields = ('chat_session', 'sender')
+    list_display = ('id', 'sender', 'receiver', 'message_preview', 'original_language', 'translated_language', 'is_read', 'timestamp')
+    list_filter = ('is_read', 'original_language', 'translated_language', 'timestamp')
+    search_fields = ('sender__phone_number', 'sender__email', 'receiver__phone_number', 'receiver__email', 'original_message', 'translated_message')
+    readonly_fields = ('id', 'timestamp')
+    raw_id_fields = ('sender', 'receiver')
     date_hierarchy = 'timestamp'
+    
+    fieldsets = (
+        ('Participants', {'fields': ('sender', 'receiver')}),
+        ('Original Message', {'fields': ('original_message', 'original_language')}),
+        ('Translated Message', {'fields': ('translated_message', 'translated_language')}),
+        ('Status', {'fields': ('is_read', 'timestamp')}),
+    )
+    
+    actions = ['mark_as_read', 'mark_as_unread']
     
     @admin.display(description='Message Preview')
     def message_preview(self, obj):
-        return obj.message[:50] + '...' if len(obj.message) > 50 else obj.message
+        return obj.original_message[:50] + '...' if len(obj.original_message) > 50 else obj.original_message
+    
+    @admin.action(description='Mark selected messages as read')
+    def mark_as_read(self, request, queryset):
+        queryset.update(is_read=True)
+    
+    @admin.action(description='Mark selected messages as unread')
+    def mark_as_unread(self, request, queryset):
+        queryset.update(is_read=False)
 
 
 @admin.register(Notifications)

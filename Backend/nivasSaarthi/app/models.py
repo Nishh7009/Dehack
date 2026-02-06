@@ -200,14 +200,14 @@ class ChatSession(models.Model):
     
 class ChatMessage(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    sender = models.ForeignKey(NewUser, on_delete=models.CASCADE, related_name='sent_chat_messages')
-    receiver = models.ForeignKey(NewUser, on_delete=models.CASCADE, related_name='received_chat_messages')
+    sender = models.ForeignKey(NewUser, on_delete=models.CASCADE, related_name='sent_chat_messages', null=True)
+    receiver = models.ForeignKey(NewUser, on_delete=models.CASCADE, related_name='received_chat_messages', null=True)
     
-    original_message = models.TextField()  # What sender typed
-    original_language = models.CharField(max_length=5)
+    original_message = models.TextField(null=True, blank=True)  # What sender typed
+    original_language = models.CharField(max_length=5, null=True, blank=True)
     
-    translated_message = models.TextField()  # What receiver sees
-    translated_language = models.CharField(max_length=5)
+    translated_message = models.TextField(null=True, blank=True)  # What receiver sees
+    translated_language = models.CharField(max_length=5, null=True, blank=True)
     
     timestamp = models.DateTimeField(auto_now_add=True)
     is_read = models.BooleanField(default=False)
