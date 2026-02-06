@@ -1,6 +1,7 @@
 *.env.dev
 *.env.prod
 *venv/
+*.venv/
 *__pycache__/
 *.pyc
 *.pyo

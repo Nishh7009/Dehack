@@ -1,0 +1,1050 @@
+openapi: 3.0.3
+info:
+  title: NivasSaarthi API
+  description: |
+    API for NivasSaarthi - A service provider marketplace connecting customers with local service providers.
+    
+    ## Authentication
+    Most endpoints require authentication via session-based login. Users must be verified (TOTP) before accessing protected endpoints.
+    
+    ## Roles
+    - **Customer**: Can request services, view their service history, and rate providers
+    - **Service Provider**: Can accept/reject service requests, manage their services
+  version: 1.0.0
+  contact:
+    name: NivasSaarthi Team
+
+servers:
+  - url: /api
+    description: API base path
+
+tags:
+  - name: Authentication
+    description: User registration, verification, and profile management
+  - name: Services
+    description: Service management for customers and providers
+  - name: Service Requests
+    description: Requesting, accepting, and rejecting services
+  - name: Geospatial
+    description: Location-based provider discovery
+  - name: AI Services
+    description: Sarvam AI speech-to-text and text-to-speech services
+
+paths:
+  /register/:
+    post:
+      tags:
+        - Authentication
+      summary: Register a new user
+      description: Creates a new user account with email and password. Generates a TOTP secret for verification.
+      operationId: registerUser
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UserBaseRegistration'
+      responses:
+        '201':
+          description: User registered successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+              example:
+                message: "User registered successfully"
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationError'
+
+  /verify-totp/:
+    post:
+      tags:
+        - Authentication
+      summary: Verify TOTP code
+      description: Verifies the TOTP code sent to the user. Must be authenticated (logged in).
+      operationId: verifyTotp
+      security:
+        - sessionAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - totp_code
+              properties:
+                totp_code:
+                  type: string
+                  description: The 6-digit TOTP code
+                  example: "123456"
+      responses:
+        '200':
+          description: TOTP verified successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+              example:
+                message: "TOTP verified successfully"
+        '400':
+          description: Invalid OTP code
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: "Invalid OTP code"
+        '404':
+          description: User not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /resend-totp/:
+    get:
+      tags:
+        - Authentication
+      summary: Resend TOTP code
+      description: Generates a new TOTP secret and resends the verification code. Limited retries available.
+      operationId: resendTotp
+      security:
+        - sessionAuth: []
+      responses:
+        '200':
+          description: TOTP resent successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+              example:
+                message: "TOTP resent successfully"
+        '400':
+          description: Maximum OTP retries exceeded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: "Maximum OTP retries exceeded"
+        '404':
+          description: User not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /profile-completion/:
+    post:
+      tags:
+        - Authentication
+      summary: Complete user profile
+      description: Updates user profile with additional information. Requires verified authentication.
+      operationId: completeProfile
+      security:
+        - verifiedAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UserProfileCompletion'
+      responses:
+        '200':
+          description: Profile marked as completed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+              example:
+                message: "Profile marked as completed"
+
+  /services/:
+    get:
+      tags:
+        - Services
+      summary: Get services for a customer
+      description: Retrieves all services requested by a specific customer. Only the customer themselves can access their services.
+      operationId: getServicesForCustomer
+      security:
+        - verifiedAuth: []
+      parameters:
+        - name: customer_id
+          in: query
+          required: true
+          description: UUID of the customer
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: List of services
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  services:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/CustomerServiceItem'
+        '400':
+          description: Customer ID is required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '403':
+          description: Unauthorized access to services
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '404':
+          description: Customer not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+
+  /services/provider/:
+    get:
+      tags:
+        - Services
+      summary: Get services for a provider
+      description: Retrieves all services assigned to a specific service provider. Only the provider themselves can access their services.
+      operationId: getServicesForProvider
+      security:
+        - verifiedAuth: []
+      parameters:
+        - name: provider_id
+          in: query
+          required: true
+          description: UUID of the service provider
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: List of services
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  services:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ProviderServiceItem'
+        '400':
+          description: Provider ID is required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '403':
+          description: Unauthorized access to services
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '404':
+          description: Service provider not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+
+  /services/details/:
+    get:
+      tags:
+        - Services
+      summary: Get service details
+      description: Retrieves detailed information about a specific service. Accessible by both the customer and provider of the service.
+      operationId: getServiceDetails
+      security:
+        - verifiedAuth: []
+      parameters:
+        - name: service_id
+          in: query
+          required: true
+          description: UUID of the service
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Service details
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  service:
+                    $ref: '#/components/schemas/ServiceDetails'
+        '400':
+          description: Service ID is required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '403':
+          description: Unauthorized access to service details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '404':
+          description: Service not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+
+  /services/complete/:
+    post:
+      tags:
+        - Services
+      summary: Mark service as complete
+      description: Marks a service as completed from either the customer or provider side. Both parties must verify for full completion.
+      operationId: completeService
+      security:
+        - verifiedAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - service_id
+              properties:
+                service_id:
+                  type: string
+                  format: uuid
+                  description: UUID of the service to complete
+      responses:
+        '200':
+          description: Service marked as completed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+              example:
+                message: "Service marked as completed"
+        '400':
+          description: Service ID is required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '403':
+          description: Unauthorized access to complete service
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '404':
+          description: Service not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+
+  /services/request/:
+    post:
+      tags:
+        - Service Requests
+      summary: Request a service
+      description: Creates a new service request from a customer to a service provider. Optionally validates distance if location is provided.
+      operationId: requestService
+      security:
+        - verifiedAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ServiceRequestInput'
+      responses:
+        '201':
+          description: Service requested successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: "Service requested successfully"
+                  service_request_id:
+                    type: string
+                    format: uuid
+        '400':
+          description: Validation error or provider too far
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/MessageResponse'
+                  - type: object
+                    properties:
+                      message:
+                        type: string
+                      distance_km:
+                        type: number
+        '404':
+          description: Customer or Service Provider not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+
+  /services/requests/incoming/:
+    get:
+      tags:
+        - Service Requests
+      summary: Get incoming service requests
+      description: Retrieves all pending service requests for a service provider.
+      operationId: getIncomingRequests
+      security:
+        - verifiedAuth: []
+      responses:
+        '200':
+          description: List of incoming service requests
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  service_requests:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/IncomingServiceRequest'
+        '403':
+          description: Only service providers can view incoming requests
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '404':
+          description: Service provider not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+
+  /services/requests/outgoing/:
+    get:
+      tags:
+        - Service Requests
+      summary: Get outgoing service requests
+      description: Retrieves all service requests made by a customer.
+      operationId: getOutgoingRequests
+      security:
+        - verifiedAuth: []
+      responses:
+        '200':
+          description: List of outgoing service requests
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  service_requests:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/OutgoingServiceRequest'
+        '403':
+          description: Only customers can view outgoing requests
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '404':
+          description: Customer not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+
+  /services/requests/accept/:
+    post:
+      tags:
+        - Service Requests
+      summary: Accept a service request
+      description: Accepts a pending service request, creating a new Service record.
+      operationId: acceptServiceRequest
+      security:
+        - verifiedAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - service_request_id
+              properties:
+                service_request_id:
+                  type: string
+                  format: uuid
+                  description: UUID of the service request to accept
+      responses:
+        '200':
+          description: Service request accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+              example:
+                message: "Service request accepted"
+        '400':
+          description: Service Request ID is required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '404':
+          description: Service request not found or unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+
+  /services/requests/reject/:
+    post:
+      tags:
+        - Service Requests
+      summary: Reject a service request
+      description: Rejects a pending service request.
+      operationId: rejectServiceRequest
+      security:
+        - verifiedAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - service_request_id
+              properties:
+                service_request_id:
+                  type: string
+                  format: uuid
+                  description: UUID of the service request to reject
+      responses:
+        '200':
+          description: Service request rejected
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+              example:
+                message: "Service request rejected"
+        '400':
+          description: Service Request ID is required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '404':
+          description: Service request not found or unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+
+  /nearby-providers/:
+    get:
+      tags:
+        - Geospatial
+      summary: Get nearby service providers
+      description: |
+        Finds service providers within a specified radius of a given location using PostGIS.
+        Results are ordered by distance (closest first).
+      operationId: getNearbyProviders
+      security:
+        - verifiedAuth: []
+      parameters:
+        - name: latitude
+          in: query
+          required: true
+          description: Latitude of the search location
+          schema:
+            type: number
+            format: double
+            example: 28.6139
+        - name: longitude
+          in: query
+          required: true
+          description: Longitude of the search location
+          schema:
+            type: number
+            format: double
+            example: 77.2090
+        - name: radius_km
+          in: query
+          required: false
+          description: Search radius in kilometers (default 5)
+          schema:
+            type: number
+            format: double
+            default: 5
+            example: 10
+        - name: service_type
+          in: query
+          required: false
+          description: Comma-separated list of service types to filter by
+          schema:
+            type: string
+            example: "plumbing,electrical"
+      responses:
+        '200':
+          description: List of nearby service providers
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NearbyProvidersResponse'
+        '400':
+          description: Invalid parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+              examples:
+                missingCoords:
+                  summary: Missing coordinates
+                  value:
+                    message: "Latitude and longitude are required query parameters."
+                invalidCoords:
+                  summary: Invalid coordinates
+                  value:
+                    message: "Invalid latitude or longitude values."
+
+  /speech-to-text/:
+    post:
+      tags:
+        - AI Services
+      summary: Convert speech to text
+      description: Transcribes audio to text using Sarvam AI's speech-to-text model.
+      operationId: speechToText
+      security:
+        - verifiedAuth: []
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required:
+                - audio
+              properties:
+                audio:
+                  type: string
+                  format: binary
+                  description: Audio file (WAV format recommended)
+      responses:
+        '200':
+          description: Transcription successful
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  transcript:
+                    type: string
+                    description: The transcribed text
+                    example: "Hello, I need a plumber for my kitchen sink."
+        '400':
+          description: Audio file is missing
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+              example:
+                message: "Audio file provided is missing!"
+        '500':
+          description: Server error
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  error:
+                    type: string
+
+  /text-to-speech/:
+    post:
+      tags:
+        - AI Services
+      summary: Convert text to speech
+      description: |
+        Converts text to speech using Sarvam AI. Supports multiple Indian languages.
+        Falls back to browser TTS for unsupported languages.
+        
+        Supported languages: Bengali (bn-IN), Gujarati (gu-IN), Kannada (kn-IN), 
+        Malayalam (ml-IN), Marathi (mr-IN), Odia (od-IN), Punjabi (pa-IN), 
+        Tamil (ta-IN), Telugu (te-IN), Hindi (hi-IN)
+      operationId: textToSpeech
+      security:
+        - verifiedAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - text
+              properties:
+                text:
+                  type: string
+                  description: The text to convert to speech
+                  example: "नमस्ते, मुझे एक प्लंबर की जरूरत है।"
+                language:
+                  type: string
+                  description: Language code (e.g., hi-IN for Hindi)
+                  default: "en-IN"
+                  example: "hi-IN"
+      responses:
+        '200':
+          description: Audio generated or fallback to browser TTS
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/TTSAudioResponse'
+                  - $ref: '#/components/schemas/TTSFallbackResponse'
+        '400':
+          description: Text is required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+              example:
+                message: "Text is required"
+
+components:
+  securitySchemes:
+    sessionAuth:
+      type: apiKey
+      in: cookie
+      name: sessionid
+      description: Django session authentication
+    verifiedAuth:
+      type: apiKey
+      in: cookie
+      name: sessionid
+      description: Django session authentication with verified user status
+
+  schemas:
+    UserBaseRegistration:
+      type: object
+      required:
+        - email
+        - password
+      properties:
+        email:
+          type: string
+          format: email
+          description: User's email address
+          example: "user@example.com"
+        password:
+          type: string
+          format: password
+          minLength: 8
+          description: User's password (min 8 characters)
+          example: "securepassword123"
+
+    UserProfileCompletion:
+      type: object
+      required:
+        - first_name
+        - last_name
+        - role
+        - preferred_language
+        - phone_number
+      properties:
+        first_name:
+          type: string
+          maxLength: 30
+          example: "Rahul"
+        last_name:
+          type: string
+          maxLength: 30
+          example: "Sharma"
+        role:
+          type: string
+          enum: [customer, service_provider]
+          example: "customer"
+        preferred_language:
+          type: string
+          enum: [en, hi, bn, ta, te, mr, gu, kn, ml, pa, or, as, ur]
+          example: "hi"
+        phone_number:
+          type: string
+          maxLength: 10
+          example: "9876543210"
+        address:
+          type: string
+          maxLength: 255
+          example: "123 Main Street, Sector 5"
+        city:
+          type: string
+          maxLength: 100
+          example: "New Delhi"
+        state:
+          type: string
+          maxLength: 100
+          example: "Delhi"
+        pincode:
+          type: string
+          maxLength: 10
+          example: "110001"
+        latitude:
+          type: number
+          format: double
+          example: 28.6139
+        longitude:
+          type: number
+          format: double
+          example: 77.2090
+
+    ServiceRequestInput:
+      type: object
+      required:
+        - customer_id
+        - provider_id
+        - description
+      properties:
+        customer_id:
+          type: string
+          format: uuid
+          description: UUID of the customer requesting the service
+        provider_id:
+          type: string
+          format: uuid
+          description: UUID of the service provider
+        description:
+          type: string
+          description: Description of the service needed
+          example: "Need help fixing a leaky faucet in the kitchen"
+        requested_date:
+          type: string
+          format: date-time
+          description: Optional preferred date/time for the service
+        service_latitude:
+          type: number
+          format: double
+          description: Latitude of the service location (for distance validation)
+          example: 28.6139
+        service_longitude:
+          type: number
+          format: double
+          description: Longitude of the service location (for distance validation)
+          example: 77.2090
+
+    CustomerServiceItem:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        service_provider:
+          type: string
+          description: Full name of the service provider
+          example: "Amit Kumar"
+        description:
+          type: string
+        requested_on:
+          type: string
+          format: date-time
+
+    ProviderServiceItem:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        customer:
+          type: string
+          description: Full name of the customer
+          example: "Priya Singh"
+        description:
+          type: string
+        requested_on:
+          type: string
+          format: date-time
+        completed:
+          type: boolean
+
+    ServiceDetails:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        customer:
+          type: string
+          description: Full name of the customer
+        service_provider:
+          type: string
+          description: Full name of the service provider
+        description:
+          type: string
+        requested_on:
+          type: string
+          format: date-time
+
+    IncomingServiceRequest:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        customer:
+          type: string
+          description: Full name of the customer
+          example: "Priya Singh"
+        description:
+          type: string
+        requested_on:
+          type: string
+          format: date-time
+
+    OutgoingServiceRequest:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        service_provider:
+          type: string
+          description: Full name of the service provider
+          example: "Amit Kumar"
+        description:
+          type: string
+        status:
+          type: string
+          enum: [PENDING, ACCEPTED, REJECTED]
+        requested_on:
+          type: string
+          format: date-time
+
+    NearbyProvidersResponse:
+      type: object
+      properties:
+        providers:
+          type: array
+          items:
+            $ref: '#/components/schemas/NearbyProvider'
+        count:
+          type: integer
+          description: Total number of providers found
+          example: 5
+        search_radius_km:
+          type: number
+          description: The search radius used
+          example: 5
+        search_location:
+          type: object
+          properties:
+            latitude:
+              type: string
+            longitude:
+              type: string
+
+    NearbyProvider:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        first_name:
+          type: string
+          example: "Amit"
+        last_name:
+          type: string
+          example: "Kumar"
+        phone_number:
+          type: string
+          example: "9876543210"
+        city:
+          type: string
+          example: "New Delhi"
+        distance_km:
+          type: number
+          format: double
+          description: Distance from search location in kilometers
+          example: 2.5
+        average_rating:
+          type: number
+          format: double
+          example: 4.5
+        years_of_experience:
+          type: integer
+          example: 5
+        services:
+          type: array
+          items:
+            type: string
+          example: ["plumbing", "electrical"]
+        bio:
+          type: string
+          example: "Experienced plumber with 5+ years of service"
+
+    TTSAudioResponse:
+      type: object
+      properties:
+        audio:
+          type: string
+          format: byte
+          description: Base64 encoded WAV audio
+        format:
+          type: string
+          enum: [wav]
+        use_browser_tts:
+          type: boolean
+          example: false
+
+    TTSFallbackResponse:
+      type: object
+      properties:
+        message:
+          type: string
+          example: "Language not supported by Sarvam, use browser TTS"
+        use_browser_tts:
+          type: boolean
+          example: true
+
+    MessageResponse:
+      type: object
+      properties:
+        message:
+          type: string
+
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+
+    ValidationError:
+      type: object
+      additionalProperties:
+        type: array
+        items:
+          type: string
+      example:
+        email: ["This field is required."]
+        password: ["Ensure this field has at least 8 characters."]
