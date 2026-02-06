@@ -25,4 +25,14 @@ urlpatterns = [
     path('services/requests/outgoing/', views.get_outgoing_requests, name='outgoing_requests'),
     path('services/requests/accept/', views.accept_service_request, name='accept_request'),
     path('services/requests/reject/', views.reject_service_request, name='reject_request'),
+    
+    # Notifications endpoints
+    path('notifications/', views.get_notifications, name='get_notifications'),
+    path('notifications/mark-read/<uuid:notification_id>/', views.mark_notification_as_read, name='mark_notification_as_read'),
+    path('notifications/mark-all-read/', views.mark_all_notifications_as_read, name='mark_all_notifications_as_read'),
+    path('notifications/unread-count/', views.get_unread_notification_count, name='unread_notifications_count'),
+
+    # SOS endpoints
+    path('emergency/report/<uuid:service_id>/', views.report_emergency, name='report_emergency'),
+    path('emergency/resolve/<uuid:emergency_id>/', views.resolve_emergency, name='resolve_emergency'),
 ]

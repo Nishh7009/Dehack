@@ -7,7 +7,7 @@ from .models import ROLES, NewUser, Service, ServiceRequest, ServiceProviderProf
 from rest_framework.response import Response
 from django.core.mail import send_mail
 from rest_framework import status
-from pyotp import TOTP
+import pyotp
 from django.utils import timezone
 from django.contrib.gis.db.models.functions import Distance
 from django.contrib.gis.measure import D
@@ -21,42 +21,53 @@ import os
 @permission_classes([AllowAny])
 def register(request):
     serializer = UserBaseRegistrationSerializer(data=request.data)
+    if NewUser.objects.filter(email=request.data.get('email')).exists():
+        return Response({"error": "Email already registered"}, status=status.HTTP_400_BAD_REQUEST)
     if serializer.is_valid():
-        user = serializer.save()
-        user.totp_secret = TOTP.generate_secret()
-        login(request, user)
+        if serializer.validated_data['password'] != serializer.validated_data['confirm_password']:
+            return Response({"error": "Password and confirm password do not match"}, status=status.HTTP_400_BAD_REQUEST)
+        user = NewUser.objects.create(
+            email=serializer.validated_data['email'],
+            password=serializer.validated_data['password']
+        )
+        user.totp_secret = pyotp.random_base32()
+        user.is_active = False
         send_mail(
             subject="Your OTP for Nivas Saarthi Registration",
-            message=f"Your OTP code is: {TOTP(user.totp_secret).now()}\nThis code will expire in 30 seconds.",
+            message=f"Your OTP code is: {pyotp.TOTP(user.totp_secret).now()}\nThis code will expire in 30 seconds.",
             from_email=os.getenv('EMAIL_SENDER_ID'),
             recipient_list=[user.email],
             fail_silently=False,
         )
         user.save()
-        return Response({"message": "User registered successfully"}, status=status.HTTP_201_CREATED)
+        return Response({"message": "User registered successfully", "user_id": user.id}, status=status.HTTP_201_CREATED)
     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 @api_view(['POST'])
-@permission_classes([IsAuthenticated])
+@permission_classes([AllowAny])
 def verify_totp(request):
     totp_code = request.data.get('totp_code')
+    user_id = request.data.get('user_id')
     try:
-        user = request.user
+        user = NewUser.objects.get(id=user_id)
         if user.otp_retries <= 0:
             user.otp_retries = 3
-            user.save()
+            user.delete()
             return Response({"error": "Maximum OTP retries exceeded"}, status=status.HTTP_400_BAD_REQUEST)
-        totp = TOTP(user.totp_secret)
+        totp = pyotp.TOTP(user.totp_secret)
         if totp.verify(totp_code):
             user.is_verified = True
-            user.otp_retries = 3 
+            user.is_active = True  # Make sure this is set!
+            user.otp_retries = 3
             user.save()
+            login(request, user)
+            
             return Response({"message": "TOTP verified successfully"}, status=status.HTTP_200_OK)
         else:
             user.otp_retries -= 1
             send_mail(
                 subject="Your OTP for Nivas Saarthi Registration - Retry",
-                message=f"Your OTP code is: {TOTP(user.totp_secret).now()}\nThis code will expire in 30 seconds.\nYou have {user.otp_retries} retries left.",
+                message=f"Your OTP code is: {pyotp.TOTP(user.totp_secret).now()}\nThis code will expire in 30 seconds.\nYou have {user.otp_retries} retries left.",
                 from_email=os.getenv('EMAIL_SENDER_ID'),
                 recipient_list=[user.email],
                 fail_silently=False,
@@ -72,12 +83,11 @@ def forgot_password(request):
     email = request.data.get('email')
     try:
         user = NewUser.objects.get(email=email)
-        user.totp_secret = TOTP.generate_secret()
         user.otp_retries = 3 
         user.save()
         send_mail(
             subject="Your OTP for Nivas Saarthi Password Reset",
-            message=f"Your OTP code is: {TOTP(user.totp_secret).now()}\nThis code will expire in 30 seconds.",
+            message=f"Your OTP code is: {pyotp.TOTP(user.totp_secret).now()}\nThis code will expire in 30 seconds.",
             from_email=os.getenv('EMAIL_SENDER_ID'),
             recipient_list=[user.email],
             fail_silently=False,
@@ -94,7 +104,7 @@ def reset_password(request):
         totp_code = request.data.get('totp_code')
         new_password = request.data.get('new_password')
         user = NewUser.objects.get(email=email)
-        totp = TOTP(user.totp_secret)
+        totp = pyotp.TOTP(user.totp_secret)
         if user.otp_retries <= 0:
             user.otp_retries = 3
             user.save()
@@ -109,7 +119,7 @@ def reset_password(request):
             user.otp_retries -= 1
             send_mail(
                 subject="Your OTP for Nivas Saarthi Password Reset - Retry",
-                message=f"Your OTP code is: {TOTP(user.totp_secret).now()}\nThis code will expire in 30 seconds.\nYou have {user.otp_retries} retries left.",
+                message=f"Your OTP code is: {pyotp.TOTP(user.totp_secret).now()}\nThis code will expire in 30 seconds.\nYou have {user.otp_retries} retries left.",
                 from_email=os.getenv('EMAIL_SENDER_ID'),
                 recipient_list=[user.email],
                 fail_silently=False,
@@ -120,17 +130,17 @@ def reset_password(request):
         return Response({"error": "User not found"}, status=status.HTTP_404_NOT_FOUND)
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated])
+@permission_classes([AllowAny])
 def resend_totp(request):
+    user_id = request.query_params.get('user_id')
     try:
-        user = request.user
+        user = NewUser.objects.get(id=user_id)
         if user.otp_retries > 0:
-            user.totp_secret = TOTP.generate_secret()
             user.otp_retries -= 1
             user.save()
             send_mail(
                 subject="Your OTP for Nivas Saarthi Registration - Resent",
-                message=f"Your OTP code is: {TOTP(user.totp_secret).now()}\nThis code will expire in 30 seconds.\nYou have {user.otp_retries} retries left.",
+                message=f"Your OTP code is: {pyotp.TOTP(user.totp_secret).now()}\nThis code will expire in 30 seconds.\nYou have {user.otp_retries} retries left.",
                 from_email=os.getenv('EMAIL_SENDER_ID'),
                 recipient_list=[user.email],
                 fail_silently=False,
@@ -324,6 +334,16 @@ def request_service(request):
             description=description,
             requested_on=requested_date if requested_date else timezone.now()
         )
+        # Create notification for provider
+        notification = Notifications(
+            user=provider
+        )
+        notification.form_message({
+            'event': 'new_service_request',
+            'customer_name': customer.first_name,
+            'service_description': description
+        })
+        notification.save()
         return Response({'message': 'Service requested successfully', 'service_request_id': str(service_request.id)}, status=status.HTTP_201_CREATED)
     except NewUser.DoesNotExist:
         return Response({'message': 'Customer or Service Provider not found'}, status=status.HTTP_404_NOT_FOUND)
@@ -344,6 +364,16 @@ def accept_service_request(request):
             description=service_request.description,
             requested_on=service_request.requested_on
         )
+        # Create notification for customer
+        notification = Notifications.objects.create(
+            user=service_request.customer
+        )
+        notification.form_message({
+            'event': 'service_request_accepted',
+            'service_description': service_request.description,
+            'service_provider_name': service_request.service_provider.first_name
+        })
+        notification.save()
         service_request.save()
         return Response({'message': 'Service request accepted'}, status=status.HTTP_200_OK)
     except ServiceRequest.DoesNotExist:
@@ -360,6 +390,16 @@ def reject_service_request(request):
         service_request.service_acceptance = False
         service_request.status = "REJECTED"
         service_request.save()
+        # Create notification for customer
+        notification = Notifications.objects.create(
+            user=service_request.customer
+        )
+        notification.form_message({
+            'event': 'service_request_rejected',
+            'service_description': service_request.description,
+            'service_provider_name': service_request.service_provider.first_name
+        })
+        notification.save()
         return Response({'message': 'Service request rejected'}, status=status.HTTP_200_OK)
     except ServiceRequest.DoesNotExist:
         return Response({'message': 'Service request not found or unauthorized'}, status=status.HTTP_404_NOT_FOUND)
@@ -457,6 +497,108 @@ def get_nearby_providers(request):
         'search_location': {'latitude': lat, 'longitude': lon}
     }, status=status.HTTP_200_OK)
 
+
+################################### NOTIFICATION VIEWS ###################################
+@api_view(['GET'])
+@permission_classes([IsVerifiedAndAuthenticated])
+def get_notifications(request):
+    notifications = Notifications.objects.filter(user=request.user).order_by('-created_at')
+    notifications_data = [{
+        'id': str(notification.id),
+        'message': notification.message,
+        'created_at': notification.created_at,
+        'read': notification.read
+    } for notification in notifications]
+    return Response({'notifications': notifications_data}, status=status.HTTP_200_OK)
+
+@api_view(['POST'])
+@permission_classes([IsVerifiedAndAuthenticated])
+def mark_notification_as_read(request, notification_id):
+    try:
+        notification = Notifications.objects.get(id=notification_id, user=request.user)
+        notification.read = True
+        notification.save()
+        return Response({'message': 'Notification marked as read'}, status=status.HTTP_200_OK)
+    except Notifications.DoesNotExist:
+        return Response({'message': 'Notification not found'}, status=status.HTTP_404_NOT_FOUND)
+
+@api_view(['GET'])
+@permission_classes([IsVerifiedAndAuthenticated])
+def get_unread_notification_count(request):
+    unread_count = Notifications.objects.filter(user=request.user, read=False).count()
+    return Response({'unread_count': unread_count}, status=status.HTTP_200_OK)
+
+@api_view(['POST'])
+@permission_classes([IsVerifiedAndAuthenticated])
+def mark_all_notifications_as_read(request):
+    Notifications.objects.filter(user=request.user, read=False).update(read=True)
+    return Response({'message': 'All notifications marked as read'}, status=status.HTTP_200_OK)
+
+
+################################### EMERGENCY VIEWS ###################################
+@api_view(['POST'])
+@permission_classes([IsVerifiedAndAuthenticated])
+def report_emergency(request, service_id):
+    try:
+        latitude = request.data.get('latitude')
+        longitude = request.data.get('longitude')
+        user = request.user
+        if not latitude or not longitude:
+            return Response({'message': 'Latitude and longitude are required'}, status=status.HTTP_400_BAD_REQUEST)
+        location = Point(float(longitude), float(latitude), srid=4326)
+        emergency = SOSRequest.objects.create(
+            user=user,
+            longitude=location.x,
+            latitude=location.y,
+            culprit = NewUser.objects.get(id=Service.objects.get(id=service_id).service_provider.id)
+        )
+        blacklist = Blacklist.objects.filter(user=emergency.culprit)
+        emergency.save()
+        emergency_contacts = EmergencyContact.objects.filter(user=user)
+        for contact in emergency_contacts:
+            # Send SMS via Twilio
+            twilio_account_sid = os.getenv('TWILIO_ACCOUNT_SID')
+            twilio_auth_token = os.getenv('TWILIO_AUTH_TOKEN')
+            twilio_phone = os.getenv('TWILIO_PHONE_NUMBER')
+            
+            if twilio_account_sid and twilio_auth_token and twilio_phone:
+                try:
+                    client = Client(twilio_account_sid, twilio_auth_token)
+                    message = client.messages.create(
+                        body=f"Emergency Alert! {user.first_name} {user.last_name} has reported an emergency.\nLocation: https://www.google.com/maps/search/?api=1&query={latitude},{longitude}\nTime: {emergency.reported_on.strftime('%Y-%m-%d %H:%M:%S')}",
+                        from_=twilio_phone,
+                        to=contact.contact_phone_number
+                    )
+                except Exception as e:
+                    print(f"SMS sending failed: {str(e)}")
+
+        notification = Notifications.objects.create(
+            user=user
+        )
+
+        notification.form_message({
+            'event': 'emergency_reported',
+            'latitude': latitude,
+            'longitude': longitude,
+            'reported_on': emergency.reported_on.strftime("%Y-%m-%d %H:%S")
+        })
+        notification.save()
+        return Response({'message': 'Emergency reported successfully'}, status=status.HTTP_201_CREATED)
+    except Exception as e:
+        return Response({'message': 'Error reporting emergency', 'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+@api_view(['POST'])
+@permission_classes([IsVerifiedAndAuthenticated])
+def resolve_emergency(request, emergency_id):
+    try:
+        emergency = SOSRequest.objects.get(id=emergency_id, user=request.user)
+        if Blacklist.objects.filter(user=emergency.culprit).exists():
+            return Response({'message': 'Cannot resolve emergency involving a blacklisted user'}, status=status.HTTP_403_FORBIDDEN)
+        emergency.resolved = True
+        emergency.save()
+        return Response({'message': 'Emergency marked as resolved'}, status=status.HTTP_200_OK)
+    except SOSRequest.DoesNotExist:
+        return Response({'message': 'Emergency not found'}, status=status.HTTP_404_NOT_FOUND)
 ################################### SARVAM VIEWS ###################################
 @permission_classes([IsVerifiedAndAuthenticated])
 @api_view(['POST'])
@@ -591,7 +733,6 @@ def text_to_speech_server(request):
     except Exception as e:
         print(f"TTS error: {e}")
         import traceback
-        traceback.print_exc()
         if temp_audio_path and os.path.exists(temp_audio_path):
             os.unlink(temp_audio_path)
         # Fallback to browser TTS on any error

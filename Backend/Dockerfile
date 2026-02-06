@@ -11,7 +11,8 @@ RUN apt-get update && \
 RUN mkdir -p /home/app && \
     addgroup --system app && \
     adduser --system --group app
-
+# Install netcat (usually early in your Dockerfile with other system packages)
+RUN apt-get update && apt-get install -y netcat-openbsd && rm -rf /var/lib/apt/lists/*
 
 ENV HOME=/home/app
 ENV APP_HOME=/home/app/web
@@ -28,6 +29,9 @@ COPY . $APP_HOME
 RUN chown -R app:app $APP_HOME && \
     sed -i 's/\r$//g' $APP_HOME/entrypoint.sh && \
     chmod +x $APP_HOME/entrypoint.sh
+
+    # In your entrypoint.sh or at the start of your container
+RUN chown -R app:app /home/app/web/nivasSaarthi/app/migrations/
 
 USER app
 

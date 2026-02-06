@@ -5,6 +5,7 @@ from .models import NewUser
 class UserBaseRegistrationSerializer(serializers.Serializer):
     email = serializers.EmailField()
     password = serializers.CharField(write_only=True, min_length=8)
+    confirm_password = serializers.CharField(write_only=True, min_length=8)
 
 class UserRegistrationSerializer(serializers.Serializer):
     first_name = serializers.CharField(max_length=30)

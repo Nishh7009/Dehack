@@ -1,5 +1,5 @@
 from django.db import models
-from django.contrib.auth.models import AbstractBaseUser
+from django.contrib.auth.models import AbstractUser
 from django.contrib.gis.db import models as gis_models
 from django.contrib.gis.geos import Point
 import uuid
@@ -10,7 +10,7 @@ class ROLES:
     CUSTOMER = 'customer'
     SERVICE_PROVIDER = 'service_provider'
 
-class NewUser(AbstractBaseUser):
+class NewUser(AbstractUser):
     USER_ROLES = (
     (ROLES.CUSTOMER, "Customer"),
     (ROLES.SERVICE_PROVIDER, "Service Provider"),
@@ -79,9 +79,11 @@ class NewUser(AbstractBaseUser):
     updated_at = models.DateTimeField(auto_now=True)
 
     # Basic Auth Fields?
+    is_active = models.BooleanField(default=True)
+    is_staff = models.BooleanField(default=False)
     is_verified = models.BooleanField(default=False)
     otp_retries = models.IntegerField(default=3)
-    totp_secret = models.CharField(max_length=16, blank=True, null=True)
+    totp_secret = models.CharField(max_length=32, blank=True, null=True)
     profile_completed = models.BooleanField(default=False)
     
     def save(self, *args, **kwargs):
@@ -214,3 +216,62 @@ class ChatMessage(models.Model):
         self.chat_session.creds_counter += creds_used
         self.chat_session.save()
         super().save(*args, **kwargs)
+
+class Notifications(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(NewUser, on_delete=models.CASCADE, related_name='notifications')
+    message = models.TextField()
+    is_read = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def form_message(self, context):
+        # Form the message based on the context provided. Context can be a dictionary containing relevant information about the event that triggered the notification.
+        # For example, if the notification is about a new service request, the context might contain details about the service provider, customer, and service description.
+        if context.get('event') == 'new_service_request':
+            self.message = f"You have a new service request from {context.get('customer_name')} for {context.get('service_description')}."
+        elif context.get('event') == 'service_request_accepted':
+            self.message = f"Your service request for {context.get('service_description')} has been accepted by {context.get('service_provider_name')}."
+        elif context.get('event') == 'service_request_rejected':
+            self.message = f"Your service request for {context.get('service_description')} has been rejected by {context.get('service_provider_name')}."
+        elif context.get('event') == 'service_completed':
+            self.message = f"Your service request for {context.get('service_description')} has been marked as completed by {context.get('service_provider_name')}."
+        else:
+            self.message = "You have a new notification."
+    def __str__(self):
+        return f"Notification for {self.user} - {'Read' if self.is_read else 'Unread'} created on {self.created_at.strftime('%Y-%m-%d %H:%M:%S')}"
+
+class SOSRequest(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(NewUser, on_delete=models.CASCADE, related_name='sos_requests')
+    culprit = models.ForeignKey(NewUser, on_delete=models.SET_NULL, null=True, blank=True, related_name='sos_as_culprit')
+    latitude = models.DecimalField(max_digits=9, decimal_places=6)
+    longitude = models.DecimalField(max_digits=9, decimal_places=6)
+    is_resolved = models.BooleanField(default=False)
+    requested_on = models.DateTimeField(auto_now_add=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"SOS Request by {self.user} - {'Resolved' if self.is_resolved else 'Unresolved'} requested on {self.requested_on.strftime('%Y-%m-%d %H:%M:%S')}"
+
+class Blacklist(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(NewUser, on_delete=models.CASCADE, related_name='blacklist_entries')
+    blocked_user = models.ForeignKey(NewUser, on_delete=models.CASCADE, related_name='blocked_by')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"{self.user} has blocked {self.blocked_user}"
+
+class EmergencyContact(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(NewUser, on_delete=models.CASCADE, related_name='emergency_contacts')
+    name = models.CharField(max_length=100)
+    phone_number = models.CharField(max_length=10)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"Emergency Contact {self.name} for {self.user}"
