@@ -2,7 +2,10 @@ import requests
 import hashlib
 import hmac
 import json
-from .models import WebhookSubscription
+from .models import WebhookSubscription, Notifications
+from django.db.models.signals import post_save
+from django.dispatch import receiver
+
 
 def send_webhook(user, event_type, payload):
     """
@@ -43,16 +46,12 @@ def send_webhook(user, event_type, payload):
             print(f"Webhook failed for {subscription.url}: {str(e)}")
             # Optionally: deactivate webhook after X failed attempts
 
-from django.db.models.signals import post_save
-from django.dispatch import receiver
-from .models import Notification
-from .utils import send_webhook
 
 @receiver(post_save, sender=Notifications)
 def notify_webhook_on_notification(sender, instance, created, **kwargs):
     if created:
         # Get unread count
-        unread_count = Notification.objects.filter(
+        unread_count = Notifications.objects.filter(
             user=instance.user,
             is_read=False
         ).count()

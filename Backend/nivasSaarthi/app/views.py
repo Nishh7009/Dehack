@@ -2,8 +2,8 @@ from .serializers import UserRegistrationSerializer, UserBaseRegistrationSeriali
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from .permissions import IsVerifiedAndAuthenticated
-from django.contrib.auth import login
-from .models import ROLES, NewUser, Service, ServiceRequest, ServiceProviderProfile
+from django.contrib.auth import login, logout
+from .models import ROLES, NewUser, Service, ServiceRequest, ServiceProviderProfile, Notifications, SOSRequest, Blacklist, EmergencyContact, VoiceCall, CallTranscript, WebhookSubscription
 from rest_framework.response import Response
 from django.core.mail import send_mail
 from rest_framework import status
@@ -14,6 +14,9 @@ from django.contrib.gis.measure import D
 from django.contrib.gis.geos import Point
 import tempfile
 import os
+from django.core.files import File
+from django.conf import settings
+from django.views.decorators.csrf import csrf_exempt
 
 
 #################################### AUTH VIEWS ####################################
@@ -61,7 +64,12 @@ def verify_totp(request):
             user.otp_retries = 3
             user.save()
             login(request, user)
-            
+            Notifications.objects.create(
+                user=user,
+                title="Welcome to Nivas Saarthi",
+                message="Your account has been successfully verified.",
+                notification_type="info"
+            )
             return Response({"message": "TOTP verified successfully"}, status=status.HTTP_200_OK)
         else:
             user.otp_retries -= 1
@@ -95,6 +103,36 @@ def forgot_password(request):
         return Response({"message": "Password reset OTP sent to email"}, status=status.HTTP_200_OK)
     except NewUser.DoesNotExist:
         return Response({"error": "User not found"}, status=status.HTTP_404_NOT_FOUND)
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def login(request):
+    email = request.data.get('email')
+    password = request.data.get('password')
+    try:
+        user = NewUser.objects.get(email=email)
+        if not user.is_verified:
+            return Response({"error": "Email not verified"}, status=status.HTTP_403_FORBIDDEN)
+        if user.check_password(password):
+            login(request, user)
+            return Response({"message": "Login successful"}, status=status.HTTP_200_OK)
+        else:
+            return Response({"error": "Invalid credentials"}, status=status.HTTP_401_UNAUTHORIZED)
+    except NewUser.DoesNotExist:
+        return Response({"error": "User not found"}, status=status.HTTP_404_NOT_FOUND)
+    
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def user_session_details(request):
+    user = request.user
+    return Response({"profile_completed": user.profile_completed, "is_verified": user.is_verified}, status=status.HTTP_200_OK)
+
+@api_view(['POST'])
+@permission_classes([IsVerifiedAndAuthenticated])
+def logout(request):
+    request.session.flush()
+    logout(request)
+    return Response({"message": "Logged out successfully"}, status=status.HTTP_200_OK)
 
 @api_view(['POST'])
 @permission_classes([AllowAny])
@@ -737,3 +775,146 @@ def text_to_speech_server(request):
             os.unlink(temp_audio_path)
         # Fallback to browser TTS on any error
         return Response({'message': 'Error in text to speech', 'error': str(e), 'use_browser_tts': True}, status=status.HTTP_200_OK)
+
+
+##################################### WEBHOOK VIEWS #####################################
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def register_webhook(request):
+    """Register a webhook URL for notifications"""
+    url = request.data.get('url')
+    event_type = request.data.get('event_type', 'notification_count')
+    
+    if not url:
+        return Response({'error': 'URL is required'}, status=status.HTTP_400_BAD_REQUEST)
+    
+    webhook = WebhookSubscription.objects.create(
+        user=request.user,
+        url=url,
+        event_type=event_type
+    )
+    
+    return Response({
+        'message': 'Webhook registered successfully',
+        'webhook_id': str(webhook.id),
+        'secret': webhook.secret,  # Send this once, user should store it securely
+        'url': webhook.url
+    }, status=status.HTTP_201_CREATED)
+
+@api_view(['DELETE'])
+@permission_classes([IsAuthenticated])
+def delete_webhook(request, webhook_id):
+    """Delete a webhook subscription"""
+    try:
+        webhook = WebhookSubscription.objects.get(id=webhook_id, user=request.user)
+        webhook.delete()
+        return Response({'message': 'Webhook deleted'}, status=status.HTTP_200_OK)
+    except WebhookSubscription.DoesNotExist:
+        return Response({'error': 'Webhook not found'}, status=status.HTTP_404_NOT_FOUND)
+
+###################################### TWILLIO VIEWS ######################################
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def initiate_call(request):
+    """Start a translated voice call"""
+    receiver_id = request.data.get('receiver_id')
+    
+    try:
+        receiver = NewUser.objects.get(id=receiver_id)
+    except NewUser.DoesNotExist:
+        return Response({'error': 'Receiver not found'}, status=404)
+    
+    # Create call record
+    call = call_helpers.create_voice_call(request.user, receiver)
+    
+    # Build callback URLs
+    base_url = request.build_absolute_uri('/')[:-1]
+    callback_url = f"{base_url}/api/calls/{call.id}/twiml"
+    
+    # Initiate Twilio calls
+    caller_sid = twilio_service.initiate_twilio_call(
+        request.user.phone_number,
+        f"{callback_url}/caller"
+    )
+    
+    receiver_sid = twilio_service.initiate_twilio_call(
+        receiver.phone_number,
+        f"{callback_url}/receiver"
+    )
+    
+    # Update call with Twilio SID
+    call_helpers.update_call_status(
+        call.id,
+        'ringing',
+        twilio_call_sid=caller_sid
+    )
+    
+    return Response({
+        'message': 'Call initiated',
+        'call_id': str(call.id),
+        'status': 'ringing'
+    })
+
+@csrf_exempt
+def call_twiml(request, call_id, participant):
+    """Generate TwiML for Twilio call"""
+    call_data = call_helpers.get_call_data(call_id, None)
+    
+    if participant == 'caller':
+        user_id = str(call_data['call'].caller.id)
+    else:
+        user_id = str(call_data['call'].receiver.id)
+    
+    # Build WebSocket URL
+    ws_protocol = 'wss' if request.is_secure() else 'ws'
+    ws_host = request.get_host()
+    websocket_url = f"{ws_protocol}://{ws_host}/ws/call/{call_id}/user/{user_id}/"
+    
+    twiml = twilio_service.generate_twiml_with_stream(websocket_url)
+    
+    return HttpResponse(twiml, content_type='text/xml')
+
+@csrf_exempt
+def call_status(request, call_id):
+    """Handle Twilio status callbacks"""
+    status = request.POST.get('CallStatus')
+    
+    kwargs = {'status': status}
+    
+    if status == 'completed':
+        from datetime import datetime
+        kwargs['ended_at'] = datetime.now()
+        kwargs['duration'] = int(request.POST.get('CallDuration', 0))
+    
+    call_helpers.update_call_status(call_id, **kwargs)
+    
+    return HttpResponse(status=200)
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_call_transcript(request, call_id):
+    """Get transcript of a completed call"""
+    try:
+        call = VoiceCall.objects.get(id=call_id)
+        
+        if call.caller != request.user and call.receiver != request.user:
+            return Response({'error': 'Unauthorized'}, status=403)
+        
+        transcripts = call_helpers.get_call_transcripts(call_id)
+        
+        transcript_data = [
+            {
+                'speaker': t.speaker.first_name,
+                'original_text': t.original_text,
+                'translated_text': t.translated_text,
+                'timestamp': t.timestamp.isoformat()
+            }
+            for t in transcripts
+        ]
+        
+        return Response({
+            'call_id': str(call.id),
+            'transcripts': transcript_data
+        })
+    except VoiceCall.DoesNotExist:
+        return Response({'error': 'Call not found'}, status=404)

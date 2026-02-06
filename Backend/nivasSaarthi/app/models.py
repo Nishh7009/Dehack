@@ -290,3 +290,40 @@ class WebhookSubscription(models.Model):
             import secrets
             self.secret = secrets.token_hex(32)
         super().save(*args, **kwargs)
+
+class VoiceCall(models.Model):
+    status_bits = (
+        ("initiated", "Initiated"),
+        ("ringing", "Ringing"),
+        ("in-progress", "In Progress"),
+        ("completed", "Completed"),
+    )
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    caller = models.ForeignKey(NewUser, on_delete=models.CASCADE, related_name='outgoing_calls')
+    receiver = models.ForeignKey(NewUser, on_delete=models.CASCADE, related_name='incoming_calls')
+    
+    caller_language = models.CharField(max_length=5, choices=NewUser.INDIAN_LANGUAGES)
+    receiver_language = models.CharField(max_length=5, choices=NewUser.INDIAN_LANGUAGES)
+    
+    twilio_call_sid = models.CharField(max_length=255, blank=True)
+    status = models.CharField(max_length=50, default='initiated')  # initiated, ringing, in-progress, completed
+    
+    started_at = models.DateTimeField(auto_now_add=True)
+    ended_at = models.DateTimeField(null=True, blank=True)
+    duration = models.IntegerField(default=0)  # in seconds
+    
+    class Meta:
+        ordering = ['-started_at']
+
+class CallTranscript(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    call = models.ForeignKey(VoiceCall, on_delete=models.CASCADE, related_name='transcripts')
+    speaker = models.ForeignKey(NewUser, on_delete=models.CASCADE)
+    
+    original_text = models.TextField()  # What speaker said in their language
+    original_language = models.CharField(max_length=5)
+    
+    translated_text = models.TextField()  # Translation for other person
+    translated_language = models.CharField(max_length=5)
+    
+    timestamp = models.DateTimeField(auto_now_add=True)

@@ -7,7 +7,11 @@ urlpatterns = [
     path('verify-totp/', views.verify_totp, name='verify_totp'),
     path('resend-totp/', views.resend_totp, name='resend_totp'),
     path('profile-completion/', views.profile_completion, name='profile_completion'),
-    
+    path('login/', views.login_view, name='login'),
+    path('logout/', views.logout_view, name='logout'),
+    path('session-details/', views.user_session_details, name='user_session_details'),
+    path('password-reset/request/', views.forgot_password, name='request_password_reset'),
+    path('password-reset/confirm/', views.reset_password, name='confirm_password_reset'),
     # Sarvam AI endpoints
     path('speech-to-text/', views.speech_to_text_server, name='speech_to_text_server'),
     path('text-to-speech/', views.text_to_speech_server, name='text_to_speech_server'),
@@ -39,4 +43,10 @@ urlpatterns = [
     # Webhook management endpoints
     path('webhooks/register/', views.register_webhook, name='register_webhook'),
     path('webhooks/<uuid:webhook_id>/', views.delete_webhook, name='delete_webhook'),
+
+    # Call functionality endpoints
+    path('calls/initiate/', views.initiate_call, name='initiate_call'),
+    path('calls/<uuid:call_id>/twiml/<str:participant>/', views.call_twiml, name='call_twiml'),
+    path('calls/<uuid:call_id>/status/', views.call_status, name='call_status'),
+    path('calls/<uuid:call_id>/transcript/', views.get_call_transcript, name='call_transcript'),
 ]
