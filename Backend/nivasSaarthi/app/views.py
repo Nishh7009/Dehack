@@ -1,5 +1,5 @@
 from django.http import HttpResponse
-from app.utils import call_helpers
+from app.utils import call_helpers, chat_helpers
 from app import twilio_service
 from .serializers import UserRegistrationSerializer, UserBaseRegistrationSerializer
 from rest_framework.decorators import api_view, permission_classes
@@ -939,3 +939,99 @@ def get_call_transcript(request, call_id):
         })
     except VoiceCall.DoesNotExist:
         return Response({'error': 'Call not found'}, status=404)
+
+########################################## CHAT BASED VIEWS ##########################################
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_chat_room(request, other_user_id):
+    """Get or create chat room name for two users"""
+    try:
+        other_user = NewUser.objects.get(id=other_user_id)
+        room_name = chat_helpers.get_chat_room_name(request.user.id, other_user_id)
+        
+        return Response({
+            'room_name': room_name,
+            'other_user': {
+                'id': str(other_user.id),
+                'name': f"{other_user.first_name} {other_user.last_name}",
+                'language': other_user.preferred_language
+            },
+            'websocket_url': f'ws://YOUR_SERVER/ws/chat/{room_name}/user/{request.user.id}/'
+        })
+    except NewUser.DoesNotExist:
+        return Response({'error': 'User not found'}, status=404)
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_chat_history(request, other_user_id):
+    """Get chat history with another user"""
+    messages = chat_helpers.get_chat_history(request.user.id, other_user_id)
+    
+    message_data = []
+    for msg in messages:
+        # Show appropriate version based on who's requesting
+        if str(msg.sender.id) == str(request.user.id):
+            message_text = msg.original_message
+            language = msg.original_language
+        else:
+            message_text = msg.translated_message
+            language = msg.translated_language
+        
+        message_data.append({
+            'sender_id': str(msg.sender.id),
+            'message': message_text,
+            'language': language,
+            'timestamp': msg.timestamp.isoformat(),
+            'is_mine': str(msg.sender.id) == str(request.user.id),
+            'is_read': msg.is_read
+        })
+    
+    return Response({'messages': message_data})
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_chat_list(request):
+    """Get list of all chats for current user"""
+    # Get all users I've chatted with
+    sent_to = ChatMessage.objects.filter(
+        sender=request.user
+    ).values_list('receiver_id', flat=True).distinct()
+    
+    received_from = ChatMessage.objects.filter(
+        receiver=request.user
+    ).values_list('sender_id', flat=True).distinct()
+    
+    # Combine and get unique user IDs
+    chat_user_ids = set(list(sent_to) + list(received_from))
+    
+    chat_list = []
+    for user_id in chat_user_ids:
+        user = NewUser.objects.get(id=user_id)
+        
+        # Get last message
+        last_message = ChatMessage.objects.filter(
+            sender_id__in=[request.user.id, user_id],
+            receiver_id__in=[request.user.id, user_id]
+        ).order_by('-timestamp').first()
+        
+        # Get unread count
+        unread_count = ChatMessage.objects.filter(
+            sender_id=user_id,
+            receiver_id=request.user.id,
+            is_read=False
+        ).count()
+        
+        chat_list.append({
+            'user_id': str(user.id),
+            'name': f"{user.first_name} {user.last_name}",
+            'language': user.preferred_language,
+            'room_name': chat_helpers.get_chat_room_name(request.user.id, user_id),
+            'last_message': last_message.translated_message if last_message and last_message.sender_id != request.user.id else (last_message.original_message if last_message else None),
+            'last_message_time': last_message.timestamp.isoformat() if last_message else None,
+            'unread_count': unread_count
+        })
+    
+    # Sort by last message time
+    chat_list.sort(key=lambda x: x['last_message_time'] or '', reverse=True)
+    
+    return Response({'chats': chat_list})

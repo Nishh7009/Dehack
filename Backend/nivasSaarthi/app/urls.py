@@ -51,4 +51,9 @@ urlpatterns = [
     path('calls/<uuid:call_id>/twiml/<str:participant>/', views.call_twiml, name='call_twiml'),
     path('calls/<uuid:call_id>/status/', views.call_status, name='call_status'),
     path('calls/<uuid:call_id>/transcript/', views.get_call_transcript, name='call_transcript'),
+
+    # Chat endpoints
+    path('chat/room/<uuid:other_user_id>/', views.get_chat_room, name='get_chat_room'),
+    path('chat/history/<uuid:other_user_id>/', views.get_chat_history, name='get_chat_history'),
+    path('chat/list/', views.get_chat_list, name='get_chat_list'),
 ]

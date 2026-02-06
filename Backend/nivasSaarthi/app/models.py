@@ -197,25 +197,23 @@ class ChatSession(models.Model):
         return timezone.now() < self.session_started_on + self.session_validity
     def remaining_credits(self):
         return self.max_creds - self.creds_counter
-
+    
 class ChatMessage(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    chat_session = models.ForeignKey(ChatSession, on_delete=models.CASCADE, related_name='messages')
-    sender = models.ForeignKey(NewUser, on_delete=models.CASCADE, related_name='sent_messages')
-    message = models.TextField()
+    sender = models.ForeignKey(NewUser, on_delete=models.CASCADE, related_name='sent_chat_messages')
+    receiver = models.ForeignKey(NewUser, on_delete=models.CASCADE, related_name='received_chat_messages')
+    
+    original_message = models.TextField()  # What sender typed
+    original_language = models.CharField(max_length=5)
+    
+    translated_message = models.TextField()  # What receiver sees
+    translated_language = models.CharField(max_length=5)
+    
     timestamp = models.DateTimeField(auto_now_add=True)
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    def __str__(self):
-        return f"Message from {self.sender} in session {self.chat_session} sent on {self.timestamp.strftime('%Y-%m-%d %H:%M:%S')}"
-    def save(self, *args, **kwargs):
-        # Some logic to update the counter according to credits used. Budget maxxing
-        message_length = len(self.message)
-        creds_used = message_length // 100 
-        self.chat_session.creds_counter += creds_used
-        self.chat_session.save()
-        super().save(*args, **kwargs)
+    is_read = models.BooleanField(default=False)
+    
+    class Meta:
+        ordering = ['timestamp']
 
 class Notifications(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)

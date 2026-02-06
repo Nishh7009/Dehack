@@ -7,4 +7,6 @@ websocket_urlpatterns = [
     # Voice call WebSocket
     re_path(r'ws/call/(?P<call_id>[\w-]+)/user/(?P<user_id>[\w-]+)/$', 
             consumers.TranslatedCallConsumer.as_asgi()),
+    re_path(r'ws/chat/(?P<room_name>[\w-]+)/user/(?P<user_id>[\w-]+)/$', 
+            consumers.TranslatedChatConsumer.as_asgi()),
 ]
