@@ -33,6 +33,7 @@ def register(request):
         if serializer.validated_data['password'] != serializer.validated_data['confirm_password']:
             return Response({"error": "Password and confirm password do not match"}, status=status.HTTP_400_BAD_REQUEST)
         user = NewUser.objects.create(
+            username = serializer.validated_data['email'].split('@')[0],
             email=serializer.validated_data['email'],
             password=serializer.validated_data['password']
         )
@@ -1035,3 +1036,238 @@ def get_chat_list(request):
     chat_list.sort(key=lambda x: x['last_message_time'] or '', reverse=True)
     
     return Response({'chats': chat_list})
+
+
+################################### NEGOTIATION VIEWS ###################################
+@csrf_exempt
+def whatsapp_webhook(request):
+    """
+    Twilio webhook for incoming WhatsApp messages.
+    This endpoint receives messages from service providers during negotiations.
+    """
+    if request.method != 'POST':
+        return HttpResponse(status=405)
+    
+    from twilio.twiml.messaging_response import MessagingResponse
+    from . import whatsapp_negotiator
+    
+    # Extract message data from Twilio POST
+    from_number = request.POST.get('From', '')  # "whatsapp:+919876543210"
+    message_body = request.POST.get('Body', '')
+    
+    # Clean the phone number (remove "whatsapp:" prefix)
+    phone = from_number.replace('whatsapp:', '')
+    
+    # Process the message through our negotiator
+    response_message = whatsapp_negotiator.process_provider_response(phone, message_body)
+    
+    # Send the AI response back
+    if response_message:
+        whatsapp_negotiator.send_whatsapp_message(phone, response_message)
+    
+    # Return empty TwiML (we send messages separately)
+    twiml = MessagingResponse()
+    return HttpResponse(str(twiml), content_type='text/xml')
+
+
+@api_view(['POST'])
+@permission_classes([IsVerifiedAndAuthenticated])
+def start_negotiation(request):
+    """
+    Start an AI negotiation for a service request.
+    
+    Request body:
+    - service_request_id: UUID of the ServiceRequest
+    - max_budget: Maximum price the customer is willing to pay
+    - min_acceptable: Price at which to auto-accept (optional, defaults to 80% of max)
+    """
+    from . import whatsapp_negotiator
+    from .models import NegotiationSession
+    from decimal import Decimal
+    
+    service_request_id = request.data.get('service_request_id')
+    max_budget = request.data.get('max_budget')
+    min_acceptable = request.data.get('min_acceptable')
+    
+    if not service_request_id or not max_budget:
+        return Response(
+            {'message': 'service_request_id and max_budget are required'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+    
+    try:
+        max_budget = Decimal(str(max_budget))
+        # Default min_acceptable to 80% of max_budget if not provided
+        if min_acceptable:
+            min_acceptable = Decimal(str(min_acceptable))
+        else:
+            min_acceptable = max_budget * Decimal('0.8')
+        
+        # Verify the user owns this request
+        service_request = ServiceRequest.objects.get(id=service_request_id)
+        if service_request.customer != request.user:
+            return Response(
+                {'message': 'You can only negotiate your own service requests'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        # Check if there's already an active negotiation
+        active_session = NegotiationSession.objects.filter(
+            service_request=service_request,
+            status='active'
+        ).first()
+        
+        if active_session:
+            return Response(
+                {'message': 'There is already an active negotiation for this request',
+                 'session_id': str(active_session.id)},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Start the negotiation
+        session = whatsapp_negotiator.start_negotiation(
+            service_request_id=service_request_id,
+            max_budget=max_budget,
+            min_acceptable=min_acceptable
+        )
+        
+        return Response({
+            'message': 'Negotiation started successfully',
+            'session_id': str(session.id),
+            'expires_at': session.expires_at.isoformat()
+        }, status=status.HTTP_201_CREATED)
+        
+    except ServiceRequest.DoesNotExist:
+        return Response({'message': 'Service request not found'}, status=status.HTTP_404_NOT_FOUND)
+    except Exception as e:
+        return Response({'message': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['GET'])
+@permission_classes([IsVerifiedAndAuthenticated])
+def get_negotiation_status(request, session_id):
+    """Get the current status of a negotiation session"""
+    from .models import NegotiationSession
+    
+    try:
+        session = NegotiationSession.objects.get(id=session_id)
+        
+        # Verify user has access
+        if session.service_request.customer != request.user:
+            return Response({'message': 'Access denied'}, status=status.HTTP_403_FORBIDDEN)
+        
+        return Response({
+            'session_id': str(session.id),
+            'status': session.status,
+            'outcome': session.outcome,
+            'current_offer': float(session.current_offer) if session.current_offer else None,
+            'negotiated_price': float(session.service_request.negotiated_price) if session.service_request.negotiated_price else None,
+            'message_count': session.message_count,
+            'is_expired': session.is_expired(),
+            'expires_at': session.expires_at.isoformat(),
+            'created_at': session.created_at.isoformat()
+        })
+        
+    except NegotiationSession.DoesNotExist:
+        return Response({'message': 'Session not found'}, status=status.HTTP_404_NOT_FOUND)
+
+
+@api_view(['POST'])
+@permission_classes([IsVerifiedAndAuthenticated])
+def accept_negotiated_offer(request, session_id):
+    """
+    Customer accepts the negotiated price offer.
+    This creates the Service record and updates the request status.
+    """
+    from .models import NegotiationSession, Service
+    
+    try:
+        session = NegotiationSession.objects.get(id=session_id)
+        
+        # Verify user owns this negotiation
+        if session.service_request.customer != request.user:
+            return Response({'message': 'Access denied'}, status=status.HTTP_403_FORBIDDEN)
+        
+        # Verify negotiation is complete
+        if session.status != 'completed' or session.outcome != 'agreed':
+            return Response(
+                {'message': 'This negotiation is not in a completed state'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        service_request = session.service_request
+        
+        # Check if already accepted
+        if service_request.status == 'ACCEPTED':
+            return Response({'message': 'This offer has already been accepted'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Update service request
+        service_request.status = 'ACCEPTED'
+        service_request.service_acceptance = True
+        service_request.save()
+        
+        # Create the Service record
+        service = Service.objects.create(
+            customer=service_request.customer,
+            service_provider=service_request.service_provider,
+            description=f"{service_request.description} (Negotiated: ₹{service_request.negotiated_price})",
+            requested_on=service_request.requested_on
+        )
+        
+        # Notify the provider
+        Notifications.objects.create(
+            user=service_request.service_provider,
+            title="Booking Confirmed!",
+            message=f"{service_request.customer.first_name} has accepted your offer of ₹{service_request.negotiated_price} for '{service_request.description}'.",
+            notification_type='booking_confirmed'
+        )
+        
+        return Response({
+            'message': 'Offer accepted! Service booking created.',
+            'service_id': str(service.id),
+            'negotiated_price': float(service_request.negotiated_price)
+        })
+        
+    except NegotiationSession.DoesNotExist:
+        return Response({'message': 'Session not found'}, status=status.HTTP_404_NOT_FOUND)
+
+
+@api_view(['POST'])
+@permission_classes([IsVerifiedAndAuthenticated])
+def reject_negotiated_offer(request, session_id):
+    """
+    Customer rejects the negotiated price offer.
+    This allows them to try negotiating with another provider.
+    """
+    from .models import NegotiationSession
+    
+    try:
+        session = NegotiationSession.objects.get(id=session_id)
+        
+        # Verify user owns this negotiation
+        if session.service_request.customer != request.user:
+            return Response({'message': 'Access denied'}, status=status.HTTP_403_FORBIDDEN)
+        
+        # Update session
+        session.status = 'failed'
+        session.outcome = 'cancelled'
+        session.save()
+        
+        # Reset service request for potential re-negotiation
+        service_request = session.service_request
+        service_request.negotiation_status = 'NOT_STARTED'
+        service_request.negotiated_price = None
+        service_request.save()
+        
+        # Notify provider
+        from . import whatsapp_negotiator
+        whatsapp_negotiator.send_whatsapp_message(
+            session.provider_phone,
+            f"Thank you for your time. Unfortunately, the customer has decided not to proceed with this booking. We hope to connect you with other opportunities soon! - NivasSaarthi"
+        )
+        
+        return Response({'message': 'Offer rejected. You can try negotiating with another provider.'})
+        
+    except NegotiationSession.DoesNotExist:
+        return Response({'message': 'Session not found'}, status=status.HTTP_404_NOT_FOUND)
+

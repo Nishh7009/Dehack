@@ -56,4 +56,12 @@ urlpatterns = [
     path('chat/room/<uuid:other_user_id>/', views.get_chat_room, name='get_chat_room'),
     path('chat/history/<uuid:other_user_id>/', views.get_chat_history, name='get_chat_history'),
     path('chat/list/', views.get_chat_list, name='get_chat_list'),
+
+    # WhatsApp Negotiation endpoints
+    path('whatsapp/webhook/', views.whatsapp_webhook, name='whatsapp_webhook'),
+    path('negotiations/start/', views.start_negotiation, name='start_negotiation'),
+    path('negotiations/<uuid:session_id>/status/', views.get_negotiation_status, name='negotiation_status'),
+    path('negotiations/<uuid:session_id>/accept/', views.accept_negotiated_offer, name='accept_negotiation'),
+    path('negotiations/<uuid:session_id>/reject/', views.reject_negotiated_offer, name='reject_negotiation'),
 ]
+

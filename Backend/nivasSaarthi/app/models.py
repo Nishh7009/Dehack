@@ -37,7 +37,7 @@ class NewUser(AbstractUser):
     first_name = models.CharField(max_length=30)
     middle_name = models.CharField(max_length=50)
     last_name = models.CharField(max_length=20)
-    phone_number = models.CharField(max_length=10)
+    phone_number = models.CharField(max_length=20)  # E.164 format: +919876543210
     email = models.EmailField(blank=True, null=True, unique=True)
 
     # RBAC?
@@ -136,6 +136,15 @@ class ServiceRequest(models.Model):
     description = models.TextField()
     service_acceptance = models.BooleanField(default=False)
     status = models.CharField(max_length=20, default='PENDING') # PENDING, ACCEPTED, REJECTED
+    
+    # Negotiation fields
+    customer_budget = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True, 
+        help_text="Customer's maximum budget for this service")
+    negotiated_price = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True,
+        help_text="Final negotiated price agreed by provider")
+    negotiation_status = models.CharField(max_length=20, default='NOT_STARTED',
+        help_text="NOT_STARTED, IN_PROGRESS, COMPLETED, FAILED, EXPIRED")
+    
     requested_on = models.DateTimeField(auto_now_add=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -327,3 +336,71 @@ class CallTranscript(models.Model):
     translated_language = models.CharField(max_length=5)
     
     timestamp = models.DateTimeField(auto_now_add=True)
+
+
+class NegotiationSession(models.Model):
+    """
+    Tracks AI negotiation conversations with service providers via WhatsApp.
+    Each session represents one negotiation attempt for a ServiceRequest.
+    """
+    NEGOTIATION_STATUS = (
+        ('active', 'Active'),
+        ('completed', 'Completed'),
+        ('failed', 'Failed'),
+        ('expired', 'Expired'),
+    )
+    
+    OUTCOME_CHOICES = (
+        ('agreed', 'Deal Agreed'),
+        ('no_deal', 'No Deal'),
+        ('timeout', 'Timeout'),
+        ('cancelled', 'Cancelled'),
+    )
+    
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    service_request = models.ForeignKey(ServiceRequest, on_delete=models.CASCADE, related_name='negotiations')
+    provider_phone = models.CharField(max_length=20, help_text="Provider's WhatsApp number in E.164 format")
+    
+    # Conversation state for Sarvam AI context
+    conversation_history = models.JSONField(default=list, help_text="Message history for AI context")
+    
+    # Price tracking
+    current_offer = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True,
+        help_text="Provider's current price offer")
+    counter_offer = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True,
+        help_text="AI's last counter-offer")
+    
+    # Negotiation constraints
+    max_price = models.DecimalField(max_digits=10, decimal_places=2,
+        help_text="Customer's maximum budget - never exceed this")
+    min_acceptable = models.DecimalField(max_digits=10, decimal_places=2,
+        help_text="Auto-accept threshold - accept immediately if offer is at or below")
+    
+    # Session state
+    status = models.CharField(max_length=20, choices=NEGOTIATION_STATUS, default='active')
+    outcome = models.CharField(max_length=20, choices=OUTCOME_CHOICES, null=True, blank=True)
+    message_count = models.IntegerField(default=0, help_text="Number of messages exchanged")
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    expires_at = models.DateTimeField(help_text="Session timeout - negotiation fails after this")
+    
+    class Meta:
+        ordering = ['-created_at']
+    
+    def __str__(self):
+        return f"Negotiation for {self.service_request} - {self.status}"
+    
+    def is_expired(self):
+        return timezone.now() > self.expires_at
+    
+    def add_message(self, role: str, content: str):
+        """Add a message to conversation history"""
+        self.conversation_history.append({
+            'role': role,
+            'content': content,
+            'timestamp': timezone.now().isoformat()
+        })
+        self.message_count += 1
+        self.save()
+
