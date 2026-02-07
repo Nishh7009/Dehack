@@ -47,6 +47,7 @@ def register(request):
         #     fail_silently=False,
         # )
         user.is_verified = True
+        user.is_active = True
         user.save()
         refresh = RefreshToken.for_user(user)
         Notifications.objects.create(
