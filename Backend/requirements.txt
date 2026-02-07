@@ -14,6 +14,7 @@ cffi==2.0.0
 channels==4.3.2
 channels_redis==4.3.0
 charset-normalizer==3.4.4
+click==8.3.1
 constantly==23.10.4
 cryptography==46.0.4
 daphne==4.2.1
@@ -59,6 +60,7 @@ typing-inspection==0.4.2
 typing_extensions==4.15.0
 ujson==5.11.0
 urllib3==2.6.3
+uvicorn==0.40.0
 websockets==16.0
 yarl==1.22.0
 zope.interface==8.2

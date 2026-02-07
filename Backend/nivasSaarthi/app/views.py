@@ -6,7 +6,7 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from .permissions import IsVerifiedAndAuthenticated
 from rest_framework_simplejwt.tokens import RefreshToken
-from .models import ROLES, NewUser, Service, ServiceRequest, ServiceProviderProfile, Notifications, SOSRequest, Blacklist, EmergencyContact, VoiceCall, CallTranscript, WebhookSubscription
+from .models import ROLES, NewUser, Service, ServiceRequest, ServiceRating, ServiceProviderProfile, Notifications, SOSRequest, Blacklist, EmergencyContact, VoiceCall, CallTranscript, WebhookSubscription
 from rest_framework.response import Response
 from django.core.mail import send_mail
 from django.db.models import Q
@@ -381,21 +381,282 @@ def get_service_details(request):
 @api_view(['POST'])
 @permission_classes([IsVerifiedAndAuthenticated])
 def complete_service(request):
+    """
+    Complete service with optional rating (all in one API)
+    """
     service_id = request.data.get('service_id')
+    
+    # Rating fields (optional, only for customer)
+    quality_rating = request.data.get('quality_rating')
+    professionalism_rating = request.data.get('professionalism_rating')
+    punctuality_rating = request.data.get('punctuality_rating')
+    review_text = request.data.get('review_text', '')
+    
     if not service_id:
-        return Response({'message': 'Service ID is required'}, status=status.HTTP_400_BAD_REQUEST)
+        return Response({
+            'message': 'Service ID is required'
+        }, status=status.HTTP_400_BAD_REQUEST)
+    
     try:
         service = Service.objects.get(id=service_id)
+        
+        # ========== CUSTOMER COMPLETION WITH RATING ==========
         if service.customer == request.user:
             service.completion_verification_from_customer = True
+            verifier = 'customer'
+            
+            # Validate ratings if provided
+            rating_provided = all([quality_rating, professionalism_rating, punctuality_rating])
+            
+            if rating_provided:
+                # Validate rating values
+                try:
+                    quality_rating = int(quality_rating)
+                    professionalism_rating = int(professionalism_rating)
+                    punctuality_rating = int(punctuality_rating)
+                    
+                    if not all(1 <= r <= 5 for r in [quality_rating, professionalism_rating, punctuality_rating]):
+                        return Response({
+                            'message': 'All ratings must be between 1 and 5'
+                        }, status=status.HTTP_400_BAD_REQUEST)
+                except (ValueError, TypeError):
+                    return Response({
+                        'message': 'Ratings must be valid integers between 1 and 5'
+                    }, status=status.HTTP_400_BAD_REQUEST)
+                
+                # Check if already rated
+                if ServiceRating.objects.filter(service=service).exists():
+                    return Response({
+                        'message': 'You have already rated this service'
+                    }, status=status.HTTP_400_BAD_REQUEST)
+                
+                # Calculate overall rating
+                overall_rating = (quality_rating + professionalism_rating + punctuality_rating) / 3
+                
+                # Create rating
+                rating = ServiceRating.objects.create(
+                    service=service,
+                    rated_by=request.user,
+                    quality_rating=quality_rating,
+                    professionalism_rating=professionalism_rating,
+                    punctuality_rating=punctuality_rating,
+                    overall_rating=round(overall_rating, 2),
+                    review_text=review_text
+                )
+                
+                rating_created = True
+                rating_data = {
+                    'quality': quality_rating,
+                    'professionalism': professionalism_rating,
+                    'punctuality': punctuality_rating,
+                    'overall': round(overall_rating, 2),
+                    'review': review_text
+                }
+            else:
+                rating_created = False
+                rating_data = None
+            
+            # Check if both parties verified
+            if service.completion_verification_from_provider:
+                service.service_status = 'COMPLETED'
+                service_completed = True
+                
+                # Update provider rating if rating was given
+                if rating_created:
+                    provider_profile = ServiceProviderProfile.objects.get(
+                        user=service.service_provider
+                    )
+                    old_average = provider_profile.average_rating
+                    provider_profile.update_average_rating()
+                    new_average = provider_profile.average_rating
+                    
+                    # Notify provider about completion with rating
+                    Notifications.objects.create(
+                        user=service.service_provider,
+                        title="Service Completed with Rating!",
+                        message=f"Service '{service.service_type}' completed. You received {overall_rating:.1f}/5 stars. Your new average: {new_average:.2f}",
+                        notification_type="service_completed"
+                    )
+                    
+                    # Notify customer
+                    Notifications.objects.create(
+                        user=service.customer,
+                        title="Service Completed!",
+                        message=f"Your service '{service.service_type}' has been completed. Thank you for your rating!",
+                        notification_type="service_completed"
+                    )
+                else:
+                    # Completed without rating
+                    Notifications.objects.create(
+                        user=service.service_provider,
+                        title="Service Completed!",
+                        message=f"Service '{service.service_type}' has been completed. Waiting for customer rating.",
+                        notification_type="service_completed"
+                    )
+                    
+                    Notifications.objects.create(
+                        user=service.customer,
+                        title="Service Completed!",
+                        message=f"Your service '{service.service_type}' is complete. Please rate your experience!",
+                        notification_type="service_completed"
+                    )
+            else:
+                service_completed = False
+                
+                # Notify provider that customer verified
+                Notifications.objects.create(
+                    user=service.service_provider,
+                    title="Service Completion Verification",
+                    message=f"Customer verified service '{service.service_type}' as complete. Please verify to finalize.",
+                    notification_type="service_verification"
+                )
+            
+            service.save()
+            
+            # Prepare response
+            response_data = {
+                'message': 'Service completion verified by customer',
+                'service_status': service.service_status,
+                'service_completed': service_completed,
+                'verified_by': 'customer',
+                'rating_provided': rating_created
+            }
+            
+            if rating_created:
+                response_data['rating'] = rating_data
+                if service_completed:
+                    response_data['provider_new_average'] = round(new_average, 2)
+                    response_data['provider_previous_average'] = round(old_average, 2)
+            else:
+                response_data['message'] += '. You can still rate this service later.'
+                response_data['waiting_for'] = 'provider verification' if not service_completed else 'rating'
+            
+            return Response(response_data, status=status.HTTP_200_OK)
+        
+        # ========== PROVIDER COMPLETION ==========
         elif service.service_provider == request.user:
+            # Provider cannot rate, only verify completion
+            if any([quality_rating, professionalism_rating, punctuality_rating]):
+                return Response({
+                    'message': 'Service providers cannot rate services'
+                }, status=status.HTTP_403_FORBIDDEN)
+            
             service.completion_verification_from_provider = True
+            verifier = 'provider'
+            
+            if service.completion_verification_from_customer:
+                service.service_status = 'COMPLETED'
+                service_completed = True
+                
+                # Check if customer already rated
+                try:
+                    existing_rating = ServiceRating.objects.get(service=service)
+                    
+                    # Update provider rating
+                    provider_profile = ServiceProviderProfile.objects.get(
+                        user=service.service_provider
+                    )
+                    old_average = provider_profile.average_rating
+                    provider_profile.update_average_rating()
+                    new_average = provider_profile.average_rating
+                    
+                    # Notify both parties
+                    Notifications.objects.create(
+                        user=service.service_provider,
+                        title="Service Completed!",
+                        message=f"Service '{service.service_type}' completed. You received {existing_rating.overall_rating:.1f}/5 stars. Your new average: {new_average:.2f}",
+                        notification_type="service_completed"
+                    )
+                    
+                    Notifications.objects.create(
+                        user=service.customer,
+                        title="Service Completed!",
+                        message=f"Your service '{service.service_type}' has been completed successfully.",
+                        notification_type="service_completed"
+                    )
+                    
+                    rating_exists = True
+                    rating_data = {
+                        'quality': existing_rating.quality_rating,
+                        'professionalism': existing_rating.professionalism_rating,
+                        'punctuality': existing_rating.punctuality_rating,
+                        'overall': existing_rating.overall_rating,
+                        'review': existing_rating.review_text
+                    }
+                    
+                except ServiceRating.DoesNotExist:
+                    # No rating yet
+                    Notifications.objects.create(
+                        user=service.customer,
+                        title="Please Rate Your Service",
+                        message=f"Service '{service.service_type}' is complete! Please rate your experience.",
+                        notification_type="rate_service"
+                    )
+                    
+                    Notifications.objects.create(
+                        user=service.service_provider,
+                        title="Service Completed!",
+                        message=f"Service '{service.service_type}' completed. Waiting for customer rating.",
+                        notification_type="service_completed"
+                    )
+                    
+                    rating_exists = False
+                    rating_data = None
+                
+            else:
+                service_completed = False
+                rating_exists = False
+                rating_data = None
+                
+                # Notify customer
+                Notifications.objects.create(
+                    user=service.customer,
+                    title="Service Completion Verification",
+                    message=f"Provider verified service '{service.service_type}' as complete. Please verify to finalize.",
+                    notification_type="service_verification"
+                )
+            
+            service.save()
+            
+            # Prepare response
+            response_data = {
+                'message': 'Service completion verified by provider',
+                'service_status': service.service_status,
+                'service_completed': service_completed,
+                'verified_by': 'provider'
+            }
+            
+            if service_completed:
+                response_data['rating_exists'] = rating_exists
+                if rating_exists:
+                    response_data['rating'] = rating_data
+                    response_data['provider_new_average'] = round(new_average, 2)
+                    response_data['provider_previous_average'] = round(old_average, 2)
+                else:
+                    response_data['waiting_for'] = 'customer rating'
+            else:
+                response_data['waiting_for'] = 'customer verification'
+            
+            return Response(response_data, status=status.HTTP_200_OK)
+        
+        # ========== UNAUTHORIZED ==========
         else:
-            return Response({'message': 'Unauthorized access to complete service'}, status=status.HTTP_403_FORBIDDEN)
-        service.save()
-        return Response({'message': 'Service marked as completed'}, status=status.HTTP_200_OK)
+            return Response({
+                'message': 'Unauthorized access to complete service'
+            }, status=status.HTTP_403_FORBIDDEN)
+        
     except Service.DoesNotExist:
-        return Response({'message': 'Service not found'}, status=status.HTTP_404_NOT_FOUND)
+        return Response({
+            'message': 'Service not found'
+        }, status=status.HTTP_404_NOT_FOUND)
+    except ServiceProviderProfile.DoesNotExist:
+        return Response({
+            'message': 'Service provider profile not found'
+        }, status=status.HTTP_404_NOT_FOUND)
+    except Exception as e:
+        return Response({
+            'message': f'An error occurred: {str(e)}'
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 @api_view(['POST'])
 @permission_classes([IsVerifiedAndAuthenticated])
@@ -671,7 +932,7 @@ def get_nearby_providers(request):
         distance=Distance('location', user_location)
     ).filter(
         distance__lte=D(km=radius_km)
-    ).select_related('service_provider_profile').order_by('distance')
+    ).select_related('service_provider_profile').order_by('average_rating', 'distance')
     
     # Filter by service type if specified
     if service_type:
@@ -682,7 +943,7 @@ def get_nearby_providers(request):
         providers_qs = providers_qs.filter(q_filter)
     
     providers_list = list(providers_qs)
-    
+
     # Build response data
     providers_data = []
     for p in providers_list:
