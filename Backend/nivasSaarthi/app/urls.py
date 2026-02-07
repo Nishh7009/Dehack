@@ -63,5 +63,17 @@ urlpatterns = [
     path('negotiations/<uuid:session_id>/status/', views.get_negotiation_status, name='negotiation_status'),
     path('negotiations/<uuid:session_id>/accept/', views.accept_negotiated_offer, name='accept_negotiation'),
     path('negotiations/<uuid:session_id>/reject/', views.reject_negotiated_offer, name='reject_negotiation'),
+    
+    # Multi-provider negotiation endpoints
+    path('requests/<uuid:request_id>/status/', views.get_request_status, name='request_status'),
+    path('requests/<uuid:request_id>/offers/', views.get_request_offers, name='request_offers'),
+    path('requests/<uuid:request_id>/select-offer/', views.select_offer, name='select_offer'),
+    
+    # Unified services endpoint
+    path('my-services/', views.get_services, name='get_services'),
+    path('my-services/<uuid:service_id>/complete/', views.mark_service_complete, name='mark_service_complete'),
+    
+    # Public payment confirmation
+    path('confirm-payment/<str:token>/', views.confirm_payment_received, name='confirm_payment_received'),
 ]
 

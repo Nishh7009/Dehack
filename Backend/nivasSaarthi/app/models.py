@@ -125,46 +125,90 @@ class ServiceProviderProfile(models.Model):
         super().save(*args, **kwargs)
 
 class ServiceRequest(models.Model):
-    status_choices = (
-        ("PENDING", "Pending"),
-        ("ACCEPTED", "Accepted"),
-        ("REJECTED", "Rejected"),
+    """
+    A customer's request for a service. No longer tied to a single provider.
+    Celery task finds nearby providers and AI negotiates with all of them.
+    """
+    STATUS_CHOICES = (
+        ("PENDING", "Pending - Looking for providers"),
+        ("NEGOTIATING", "Negotiating with providers"),
+        ("OFFERS_READY", "Offers ready for review"),
+        ("ACCEPTED", "Offer accepted"),
+        ("CANCELLED", "Cancelled"),
+        ("EXPIRED", "Expired - no offers"),
     )
+    
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     customer = models.ForeignKey(NewUser, on_delete=models.CASCADE, related_name='service_requests')
-    service_provider = models.ForeignKey(NewUser, on_delete=models.CASCADE, related_name='service_offers')
-    description = models.TextField()
-    service_acceptance = models.BooleanField(default=False)
-    status = models.CharField(max_length=20, default='PENDING') # PENDING, ACCEPTED, REJECTED
     
-    # Negotiation fields
-    customer_budget = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True, 
-        help_text="Customer's maximum budget for this service")
-    negotiated_price = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True,
-        help_text="Final negotiated price agreed by provider")
-    negotiation_status = models.CharField(max_length=20, default='NOT_STARTED',
-        help_text="NOT_STARTED, IN_PROGRESS, COMPLETED, FAILED, EXPIRED")
+    # Service details
+    description = models.TextField(help_text="What the customer needs")
+    service_types = models.JSONField(default=list, help_text="List of service types, e.g. ['plumbing', 'electrical']")
     
-    requested_on = models.DateTimeField(auto_now_add=True)
+    # Customer's location for finding nearby providers
+    latitude = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
+    longitude = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
+    
+    # Budget (max for all negotiations)
+    customer_budget = models.DecimalField(max_digits=10, decimal_places=2,
+        help_text="Maximum budget - same limit for all providers")
+    
+    # Status tracking
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='PENDING')
+    
+    # Negotiation progress tracking
+    providers_contacted = models.PositiveIntegerField(default=0, help_text="Number of providers contacted")
+    offers_received = models.PositiveIntegerField(default=0, help_text="Number of offers received")
+    
+    # Celery task tracking
+    task_id = models.CharField(max_length=255, null=True, blank=True,
+        help_text="Celery task ID for tracking negotiation progress")
+    
+    # Final selection
+    selected_offer = models.ForeignKey('NegotiationSession', on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='selected_for_request',
+        help_text="The offer the customer chose")
+    
+    requested_on = models.DateTimeField(null=True, blank=True,
+        help_text="When the customer wants the service")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     def __str__(self):
-        return f"Service request by {self.customer} for {self.service_provider} on {self.requested_on.strftime('%Y-%m-%d %H:%M:%S')}"
+        return f"Service request by {self.customer}: {self.service_types} - {self.status}"
+    
+    def get_offers(self):
+        """Get all completed negotiation sessions for this request"""
+        return self.negotiations.filter(status='completed', outcome='agreed')
+
 
 class Service(models.Model):
-    # Service requested by customer from service provider
-    choices = (
+    """Service requested by customer from service provider"""
+    STATUS_CHOICES = (
         ("IN_PROGRESS", "In Progress"),
         ("COMPLETED", "Completed"),
         ("CANCELLED", "Cancelled"),
     )
+    PAYMENT_CHOICES = (
+        ("PENDING", "Payment Pending"),
+        ("PAID", "Paid"),
+        ("CONFIRMED", "Confirmed by Provider"),
+        ("REFUNDED", "Refunded"),
+    )
+    
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     customer = models.ForeignKey(NewUser, on_delete=models.CASCADE, related_name='services_requester')
     service_provider = models.ForeignKey(NewUser, on_delete=models.CASCADE, related_name='services_provider')
     description = models.TextField()
-    service_status = models.CharField(max_length=20, choices=choices, default='IN_PROGRESS') # IN_PROGRESS, COMPLETED, CANCELLED
-    negotiated_price = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    agreed_price = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True,
+        help_text="The negotiated price agreed upon")
+    
+    service_status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='IN_PROGRESS')
+    payment_status = models.CharField(max_length=20, choices=PAYMENT_CHOICES, default='PENDING')
+    
+    # Token for provider to confirm payment receipt (public link)
+    payment_confirmation_token = models.CharField(max_length=64, null=True, blank=True, unique=True)
+    
     completion_verification_from_customer = models.BooleanField(default=False)
     completion_verification_from_provider = models.BooleanField(default=False)
     requested_on = models.DateTimeField(auto_now_add=True)
@@ -172,7 +216,7 @@ class Service(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     def __str__(self):
-        return f"Service requested by {self.customer} from {self.service_provider} requested on {self.requested_on.strftime('%Y-%m-%d %H:%M:%S')}"
+        return f"Service by {self.service_provider} for {self.customer} - {self.service_status}"
 
 class ServiceRating(models.Model):
     # Guess

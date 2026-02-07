@@ -1,3 +1,4 @@
+import datetime
 from django.http import HttpResponse
 from app.utils import call_helpers, chat_helpers
 from app import twilio_service
@@ -662,172 +663,80 @@ def complete_service(request):
 @permission_classes([IsVerifiedAndAuthenticated])
 def request_service(request):
     """
-    Create a new service request from customer to provider.
+    Create a service request and start AI negotiation with nearby providers.
     
-    Required fields:
-    - provider_id: UUID of the service provider
-    - description: Description of service needed
-    
-    Optional fields:
-    - customer_budget: Customer's budget for negotiation
-    - requested_date: When the service is needed
-    - service_latitude: Latitude of service location
-    - service_longitude: Longitude of service location
+    Request body:
+    - description: What the customer needs
+    - service_types: List of service types, e.g. ["plumbing", "electrical"]
+    - latitude: Customer's latitude
+    - longitude: Customer's longitude
+    - customer_budget: Maximum budget (same for all negotiations)
+    - requested_date: (optional) When service is needed, format: DD_MM_YYYY
     """
-    # Get authenticated user as customer
-    customer = request.user
+    from .tasks import negotiate_with_providers
+    from decimal import Decimal
     
-    # Verify user is a customer
-    if customer.role != ROLES.CUSTOMER:
-        return Response(
-            {'message': 'Only customers can request services'},
-            status=status.HTTP_403_FORBIDDEN
-        )
-    
-    # Get request data
-    provider_id = request.data.get('provider_id')
     description = request.data.get('description')
-    requested_date = request.data.get('requested_date')
+    service_types = request.data.get('service_types')  # Now a list
+    latitude = request.data.get('latitude')
+    longitude = request.data.get('longitude')
     customer_budget = request.data.get('customer_budget')
-    service_latitude = request.data.get('service_latitude')
-    service_longitude = request.data.get('service_longitude')
+    requested_date = request.data.get('requested_date')
     
     # Validate required fields
-    if not all([provider_id, description]):
-        return Response(
-            {'message': 'Provider ID and Description are required'},
-            status=status.HTTP_400_BAD_REQUEST
-        )
+    if not all([description, service_types, latitude, longitude, customer_budget]):
+        return Response({
+            'message': 'description, service_types, latitude, longitude, and customer_budget are required'
+        }, status=status.HTTP_400_BAD_REQUEST)
+    
+    # Ensure service_types is a list
+    if isinstance(service_types, str):
+        service_types = [service_types]
+    
+    if not isinstance(service_types, list) or len(service_types) == 0:
+        return Response({
+            'message': 'service_types must be a non-empty list'
+        }, status=status.HTTP_400_BAD_REQUEST)
     
     try:
-        # Get provider
-        provider = NewUser.objects.get(id=provider_id, role=ROLES.SERVICE_PROVIDER)
-        
-        # Validate distance if service location is provided
-        distance_km = None
-        if service_latitude and service_longitude:
-            if not provider.location:
-                return Response(
-                    {'message': 'Provider location not available for distance calculation'},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-            
-            try:
-                service_location = Point(float(service_longitude), float(service_latitude), srid=4326)
-                
-                # Calculate distance using PostGIS
-                provider_with_dist = NewUser.objects.filter(id=provider_id).annotate(
-                    distance=Distance('location', service_location)
-                ).first()
-                
-                if provider_with_dist and provider_with_dist.distance:
-                    distance_km = provider_with_dist.distance.km
-                    
-                    # Check if within acceptable range (configurable)
-                    MAX_DISTANCE_KM = 50  # You can make this configurable
-                    if distance_km > MAX_DISTANCE_KM:
-                        return Response({
-                            'message': f'Provider is {distance_km:.1f}km away from the service location. Maximum allowed distance is {MAX_DISTANCE_KM}km.',
-                            'distance_km': round(distance_km, 2),
-                            'provider_location': {
-                                'latitude': provider.latitude,
-                                'longitude': provider.longitude
-                            },
-                            'service_location': {
-                                'latitude': service_latitude,
-                                'longitude': service_longitude
-                            }
-                        }, status=status.HTTP_400_BAD_REQUEST)
-                        
-            except (ValueError, TypeError) as e:
-                return Response(
-                    {'message': f'Invalid service location coordinates: {str(e)}'},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-        
-        # Parse customer budget if provided
-        if customer_budget:
-            try:
-                customer_budget = Decimal(str(customer_budget))
-            except (ValueError, TypeError):
-                return Response(
-                    {'message': 'Invalid customer_budget format'},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
+        customer_budget = Decimal(str(customer_budget))
         
         # Parse requested date if provided
+        parsed_date = None
         if requested_date:
-            from datetime import datetime
-            try:
-                if isinstance(requested_date, str):
-                    requested_date = datetime.fromisoformat(requested_date.replace('Z', '+00:00'))
-            except (ValueError, TypeError):
-                return Response(
-                    {'message': 'Invalid requested_date format. Use ISO format (YYYY-MM-DDTHH:MM:SS)'},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-        else:
-            requested_date = timezone.now()
+            parsed_date = datetime.datetime.strptime(requested_date, "%d_%m_%Y")
         
-        # Create service request
+        # Create the service request
         service_request = ServiceRequest.objects.create(
-            customer=customer,
-            service_provider=provider,
+            customer=request.user,
             description=description,
-            requested_on=requested_date,
+            service_types=service_types,  # Now a list
+            latitude=latitude,
+            longitude=longitude,
             customer_budget=customer_budget,
-            status='PENDING',
-            negotiation_status='NOT_STARTED'
+            requested_on=parsed_date,
+            status='PENDING'
         )
         
-        # Create notification for provider
-        notification_message = (
-            f"New service request from {customer.first_name} {customer.last_name}. "
-            f"Service: {description[:100]}"
-        )
-        if customer_budget:
-            notification_message += f" Budget: ₹{customer_budget}"
+        # Spawn Celery task to find providers and negotiate
+        task = negotiate_with_providers.delay(str(service_request.id))
         
-        Notifications.objects.create(
-            user=provider,
-            title="🔔 New Service Request",
-            message=notification_message,
-            notification_type='new_service_request',
-        )
+        # Store task ID for tracking
+        service_request.task_id = task.id
+        service_request.save()
         
-        # Build response
-        response_data = {
-            'message': 'Service requested successfully',
-            'service_request': {
-                'id': str(service_request.id),
-                'description': service_request.description,
-                'status': service_request.status,
-                'customer_budget': float(customer_budget) if customer_budget else None,
-                'requested_on': service_request.requested_on.isoformat(),
-                'provider': {
-                    'id': str(provider.id),
-                    'name': f"{provider.first_name} {provider.last_name}",
-                    'phone': provider.phone_number,
-                    'city': provider.city
-                }
-            }
-        }
+        return Response({
+            'message': 'Service request created! AI is now finding providers and negotiating.',
+            'service_request_id': str(service_request.id),
+            'task_id': task.id,
+            'service_types': service_types,
+            'status': 'PENDING'
+        }, status=status.HTTP_201_CREATED)
         
-        if distance_km is not None:
-            response_data['service_request']['distance_km'] = round(distance_km, 2)
-        
-        return Response(response_data, status=status.HTTP_201_CREATED)
-        
-    except NewUser.DoesNotExist:
-        return Response(
-            {'message': 'Service Provider not found'},
-            status=status.HTTP_404_NOT_FOUND
-        )
     except Exception as e:
-        return Response(
-            {'message': f'Error creating service request: {str(e)}'},
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR
-        )
+        return Response({'message': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
 @api_view(['POST'])
 @permission_classes([IsVerifiedAndAuthenticated])
 def accept_service_request(request):
@@ -1701,3 +1610,389 @@ def reject_negotiated_offer(request, session_id):
     except NegotiationSession.DoesNotExist:
         return Response({'message': 'Session not found'}, status=status.HTTP_404_NOT_FOUND)
 
+
+################################### MULTI-PROVIDER NEGOTIATION ###################################
+
+@api_view(['GET'])
+@permission_classes([IsVerifiedAndAuthenticated])
+def get_request_status(request, request_id):
+    """Get the current status of a service request and its negotiations."""
+    try:
+        service_request = ServiceRequest.objects.get(id=request_id, customer=request.user)
+        
+        sessions = service_request.negotiations.all()
+        
+        return Response({
+            'request_id': str(service_request.id),
+            'status': service_request.status,
+            'service_types': service_request.service_types,
+            'customer_budget': float(service_request.customer_budget),
+            'created_at': service_request.created_at.isoformat(),
+            # Progress tracking
+            'providers_contacted': service_request.providers_contacted,
+            'offers_received': service_request.offers_received,
+            'active_negotiations': sessions.filter(status='active').count(),
+            'selected_offer_id': str(service_request.selected_offer.id) if service_request.selected_offer else None
+        })
+        
+    except ServiceRequest.DoesNotExist:
+        return Response({'message': 'Service request not found'}, status=status.HTTP_404_NOT_FOUND)
+
+
+@api_view(['GET'])
+@permission_classes([IsVerifiedAndAuthenticated])
+def get_request_offers(request, request_id):
+    """Get all offers (completed negotiations) for a service request."""
+    from .models import NegotiationSession, ServiceProviderProfile
+    
+    try:
+        service_request = ServiceRequest.objects.get(id=request_id, customer=request.user)
+        
+        # Get all successful negotiations
+        sessions = service_request.negotiations.filter(
+            status='completed',
+            outcome='agreed'
+        ).order_by('current_offer')  # Sort by price, lowest first
+        
+        offers = []
+        for session in sessions:
+            # Get provider info from phone number
+            try:
+                provider = NewUser.objects.get(phone_number=session.provider_phone)
+                profile = provider.service_provider_profile if hasattr(provider, 'service_provider_profile') else None
+                
+                offers.append({
+                    'session_id': str(session.id),
+                    'provider': {
+                        'id': str(provider.id),
+                        'name': f"{provider.first_name} {provider.last_name}",
+                        'phone': session.provider_phone,
+                        'rating': profile.average_rating if profile else None,
+                        'years_experience': profile.years_of_experience if profile else None,
+                    },
+                    'offer_price': float(session.current_offer),
+                    'message_count': session.message_count,
+                    'created_at': session.created_at.isoformat()
+                })
+            except NewUser.DoesNotExist:
+                offers.append({
+                    'session_id': str(session.id),
+                    'provider': {'phone': session.provider_phone},
+                    'offer_price': float(session.current_offer),
+                    'message_count': session.message_count,
+                    'created_at': session.created_at.isoformat()
+                })
+        
+        return Response({
+            'request_id': str(service_request.id),
+            'status': service_request.status,
+            'offers_count': len(offers),
+            'offers': offers
+        })
+        
+    except ServiceRequest.DoesNotExist:
+        return Response({'message': 'Service request not found'}, status=status.HTTP_404_NOT_FOUND)
+
+
+@api_view(['POST'])
+@permission_classes([IsVerifiedAndAuthenticated])
+def select_offer(request, request_id):
+    """
+    Customer selects one of the negotiated offers.
+    Creates the Service record with the chosen provider.
+    """
+    from .models import NegotiationSession, Service
+    from . import whatsapp_negotiator
+    
+    session_id = request.data.get('session_id')
+    
+    if not session_id:
+        return Response({'message': 'session_id is required'}, status=status.HTTP_400_BAD_REQUEST)
+    
+    try:
+        service_request = ServiceRequest.objects.get(id=request_id, customer=request.user)
+        session = NegotiationSession.objects.get(id=session_id, service_request=service_request)
+        
+        # Verify the session is a valid offer
+        if session.status != 'completed' or session.outcome != 'agreed':
+            return Response({
+                'message': 'This is not a valid offer'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Find the provider
+        try:
+            provider = NewUser.objects.get(phone_number=session.provider_phone)
+        except NewUser.DoesNotExist:
+            return Response({'message': 'Provider not found'}, status=status.HTTP_404_NOT_FOUND)
+        
+        # Update service request
+        service_request.selected_offer = session
+        service_request.status = 'ACCEPTED'
+        service_request.save()
+        
+        # Create the Service record with agreed price
+        service = Service.objects.create(
+            customer=service_request.customer,
+            service_provider=provider,
+            description=service_request.description,
+            agreed_price=session.current_offer,
+            requested_on=service_request.requested_on or timezone.now()
+        )
+        
+        # Notify the selected provider
+        whatsapp_negotiator.send_whatsapp_message(
+            session.provider_phone,
+            f"""Great news! 🎉
+
+The customer has selected YOUR offer of ₹{session.current_offer}!
+
+Service details: {service_request.description}
+
+They'll be in touch soon to confirm the appointment. Thank you for using NivasSaarthi!"""
+        )
+        
+        # Notify other providers that the job was taken
+        other_sessions = service_request.negotiations.filter(
+            status='completed',
+            outcome='agreed'
+        ).exclude(id=session.id)
+        
+        for other in other_sessions:
+            whatsapp_negotiator.send_whatsapp_message(
+                other.provider_phone,
+                f"Thank you for your offer. The customer has selected another provider for this job. We'll connect you with more opportunities soon! - NivasSaarthi"
+            )
+        
+        # Create notification for provider
+        Notifications.objects.create(
+            user=provider,
+            title="New Booking Confirmed! 🎉",
+            message=f"You've been selected for: {service_request.description}. Price: ₹{session.current_offer}",
+            notification_type='booking_confirmed'
+        )
+        
+        return Response({
+            'message': 'Offer selected! Service booking created.',
+            'service_id': str(service.id),
+            'provider_name': f"{provider.first_name} {provider.last_name}",
+            'agreed_price': float(session.current_offer)
+        }, status=status.HTTP_201_CREATED)
+        
+    except ServiceRequest.DoesNotExist:
+        return Response({'message': 'Service request not found'}, status=status.HTTP_404_NOT_FOUND)
+    except NegotiationSession.DoesNotExist:
+        return Response({'message': 'Offer not found'}, status=status.HTTP_404_NOT_FOUND)
+
+
+################################### UNIFIED SERVICES ENDPOINT ###################################
+
+@api_view(['GET'])
+@permission_classes([IsVerifiedAndAuthenticated])
+def get_services(request):
+    """
+    Get services for the current user with filtering.
+    
+    Query params:
+    - status: Filter by status
+        - 'upcoming': Accepted, not completed (IN_PROGRESS)
+        - 'pending_payment': Completed but not paid
+        - 'completed': Fully completed and paid
+        - 'all': Everything (default)
+    - role: 'customer' or 'provider' (auto-detect if not provided)
+    """
+    status_filter = request.query_params.get('status', 'all')
+    role = request.query_params.get('role')
+    
+    user = request.user
+    
+    # Determine role if not specified
+    if role == 'provider' or (not role and user.role == 'SERVICE_PROVIDER'):
+        services = Service.objects.filter(service_provider=user)
+    else:
+        services = Service.objects.filter(customer=user)
+    
+    # Apply status filter
+    if status_filter == 'upcoming':
+        # Accepted, in progress, not completed
+        services = services.filter(service_status='IN_PROGRESS')
+    elif status_filter == 'pending_payment':
+        # Completed but payment pending
+        services = services.filter(service_status='COMPLETED', payment_status='PENDING')
+    elif status_filter == 'completed':
+        # Fully completed and paid
+        services = services.filter(service_status='COMPLETED', payment_status='PAID')
+    elif status_filter == 'cancelled':
+        services = services.filter(service_status='CANCELLED')
+    # 'all' - no filter
+    
+    services = services.order_by('-created_at')
+    
+    # Build response
+    results = []
+    for svc in services:
+        results.append({
+            'id': str(svc.id),
+            'description': svc.description,
+            'agreed_price': float(svc.agreed_price) if svc.agreed_price else None,
+            'service_status': svc.service_status,
+            'payment_status': svc.payment_status,
+            'provider': {
+                'id': str(svc.service_provider.id),
+                'name': f"{svc.service_provider.first_name} {svc.service_provider.last_name}",
+                'phone': svc.service_provider.phone_number,
+            },
+            'customer': {
+                'id': str(svc.customer.id),
+                'name': f"{svc.customer.first_name} {svc.customer.last_name}",
+            },
+            'requested_on': svc.requested_on.isoformat() if svc.requested_on else None,
+            'created_at': svc.created_at.isoformat(),
+            'completion_verification_from_customer': svc.completion_verification_from_customer,
+            'completion_verification_from_provider': svc.completion_verification_from_provider,
+        })
+    
+    return Response({
+        'count': len(results),
+        'status_filter': status_filter,
+        'services': results
+    })
+
+
+@api_view(['POST'])
+@permission_classes([IsVerifiedAndAuthenticated])
+def mark_service_complete(request, service_id):
+    """
+    Mark a service as completed.
+    
+    When customer confirms payment, a WhatsApp message is sent to provider
+    with a confirmation link.
+    
+    Request body:
+    - payment_confirmed: bool (only for customer) - marks as PAID and sends link to provider
+    """
+    from . import whatsapp_negotiator
+    import secrets
+    
+    try:
+        service = Service.objects.get(id=service_id)
+    except Service.DoesNotExist:
+        return Response({'message': 'Service not found'}, status=status.HTTP_404_NOT_FOUND)
+    
+    user = request.user
+    
+    # Determine if user is customer or provider
+    if service.customer == user:
+        service.completion_verification_from_customer = True
+        
+        # Customer confirms payment - send link to provider
+        if request.data.get('payment_confirmed', False):
+            service.payment_status = 'PAID'
+            
+            # Generate confirmation token
+            token = secrets.token_urlsafe(32)
+            service.payment_confirmation_token = token
+            service.save()
+            
+            # Build confirmation URL
+            base_url = request.build_absolute_uri('/').rstrip('/')
+            confirm_url = f"{base_url}/api/confirm-payment/{token}/"
+            
+            # Send WhatsApp to provider
+            provider = service.service_provider
+            message = f"""✅ Payment Received!
+
+{service.customer.first_name} has confirmed payment of ₹{service.agreed_price or 'N/A'} for:
+{service.description}
+
+Please confirm you received the payment by clicking here:
+{confirm_url}
+
+Thank you!
+- NivasSaarthi"""
+            
+            whatsapp_negotiator.send_whatsapp_message(provider.phone_number, message)
+        else:
+            service.save()
+        
+    elif service.service_provider == user:
+        service.completion_verification_from_provider = True
+        service.save()
+        
+    else:
+        return Response({
+            'message': 'You are not part of this service'
+        }, status=status.HTTP_403_FORBIDDEN)
+    
+    # Check if both have verified - then mark as completed
+    if service.completion_verification_from_customer and service.completion_verification_from_provider:
+        service.service_status = 'COMPLETED'
+        service.save()
+        
+        # Notify both parties
+        Notifications.objects.create(
+            user=service.customer,
+            title="Service Completed! ✅",
+            message=f"Your service with {service.service_provider.first_name} is now complete.",
+            notification_type='service_completed'
+        )
+        Notifications.objects.create(
+            user=service.service_provider,
+            title="Service Completed! ✅",
+            message=f"Your service for {service.customer.first_name} is now complete.",
+            notification_type='service_completed'
+        )
+    
+    return Response({
+        'message': 'Completion confirmed',
+        'service_id': str(service.id),
+        'service_status': service.service_status,
+        'payment_status': service.payment_status,
+        'customer_confirmed': service.completion_verification_from_customer,
+        'provider_confirmed': service.completion_verification_from_provider
+    })
+
+
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def confirm_payment_received(request, token):
+    """
+    Public endpoint for provider to confirm payment received.
+    No authentication required - uses secure token.
+    """
+    try:
+        service = Service.objects.get(payment_confirmation_token=token)
+    except Service.DoesNotExist:
+        return Response({
+            'message': 'Invalid or expired confirmation link'
+        }, status=status.HTTP_404_NOT_FOUND)
+    
+    # Already confirmed?
+    if service.payment_status == 'CONFIRMED':
+        return Response({
+            'message': 'Payment already confirmed!',
+            'service_id': str(service.id)
+        })
+    
+    # Mark as confirmed
+    service.payment_status = 'CONFIRMED'
+    service.completion_verification_from_provider = True
+    service.save()
+    
+    # Check if both verified now
+    if service.completion_verification_from_customer and service.completion_verification_from_provider:
+        service.service_status = 'COMPLETED'
+        service.save()
+        
+        Notifications.objects.create(
+            user=service.customer,
+            title="Payment Confirmed! ✅",
+            message=f"{service.service_provider.first_name} has confirmed receiving your payment.",
+            notification_type='payment_confirmed'
+        )
+    
+    return Response({
+        'message': 'Payment receipt confirmed! Thank you.',
+        'service_id': str(service.id),
+        'service_status': service.service_status,
+        'payment_status': service.payment_status
+    })

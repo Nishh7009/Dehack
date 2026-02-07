@@ -23,24 +23,71 @@ def get_twilio_client():
     return Client(account_sid, auth_token)
 
 
-def send_whatsapp_message(to_phone: str, message: str) -> bool:
+def translate_for_provider(message: str, provider_phone: str) -> str:
+    """
+    Translate a message to the provider's preferred language.
+    
+    Args:
+        message: Message in English
+        provider_phone: Provider's phone number to look up their language preference
+    
+    Returns:
+        str: Translated message (or original if translation fails/unnecessary)
+    """
+    from . import sarvam_service
+    from .models import NewUser
+    
+    try:
+        # Look up provider by phone number
+        provider = NewUser.objects.get(phone_number=provider_phone)
+        target_lang = provider.preferred_language or 'en'
+        
+        # Don't translate if already English
+        if target_lang == 'en':
+            return message
+        
+        # Translate using Sarvam AI
+        translated = sarvam_service.translate_text(
+            text=message,
+            source_lang='en',
+            target_lang=target_lang
+        )
+        
+        return translated if translated else message
+        
+    except NewUser.DoesNotExist:
+        # Provider not found, send in English
+        return message
+    except Exception as e:
+        print(f"Translation error: {e}")
+        return message
+
+
+def send_whatsapp_message(to_phone: str, message: str, translate: bool = True) -> bool:
     """
     Send a WhatsApp message via Twilio.
+    Automatically translates to provider's preferred language.
     
     Args:
         to_phone: Recipient phone in E.164 format (+919876543210)
-        message: Message text to send
+        message: Message text to send (in English)
+        translate: If True, translate to recipient's preferred language
     
     Returns:
         bool: True if sent successfully
     """
     try:
+        # Translate message if needed
+        final_message = message
+        if translate:
+            final_message = translate_for_provider(message, to_phone)
+        
         client = get_twilio_client()
         from_whatsapp = f"whatsapp:{os.getenv('TWILIO_PHONE_NUMBER')}"
         to_whatsapp = f"whatsapp:{to_phone}"
         
         client.messages.create(
-            body=message,
+            body=final_message,
             from_=from_whatsapp,
             to=to_whatsapp
         )
@@ -301,7 +348,9 @@ def extract_price_from_message(message: str) -> Decimal | None:
 
 def finalize_negotiation(session: NegotiationSession, agreed_price: Decimal, outcome: str) -> str:
     """
-    Finalize a negotiation with the agreed price.
+    Finalize a single negotiation with the agreed price.
+    In multi-provider mode, this just marks one session as complete.
+    The customer will choose from all completed sessions.
     
     Args:
         session: The NegotiationSession
@@ -311,30 +360,21 @@ def finalize_negotiation(session: NegotiationSession, agreed_price: Decimal, out
     Returns:
         str: Final message to provider
     """
+    from .tasks import mark_offers_ready_if_complete
+    
     session.status = 'completed'
     session.outcome = outcome
     session.current_offer = agreed_price
     session.save()
     
-    # Update service request
-    service_request = session.service_request
-    service_request.negotiated_price = agreed_price
-    service_request.negotiation_status = 'COMPLETED'
-    service_request.save()
-    
-    # Notify customer
-    Notifications.objects.create(
-        user=service_request.customer,
-        title="Negotiation Complete!",
-        message=f"Great news! We've negotiated a price of ₹{agreed_price} for '{service_request.description}'. Please review and confirm.",
-        notification_type='negotiation_complete'
-    )
+    # Check if all negotiations are complete and notify customer
+    mark_offers_ready_if_complete.delay(str(session.service_request.id))
     
     return f"""Thank you! 🎉
 
-The customer will be notified about your offer of ₹{agreed_price}.
+Your offer of ₹{agreed_price} has been recorded.
 
-We'll confirm the booking shortly. Looking forward to working with you!
+The customer will review all offers and make their selection. We'll notify you once they decide!
 
 - NivasSaarthi"""
 

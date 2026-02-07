@@ -48,6 +48,28 @@ services:
     networks:
       - app-network
     restart: unless-stopped
+
+  celery:
+    build:
+      context: ./Backend
+      dockerfile: Dockerfile
+    container_name: nivas_saarthi_celery_dev
+    command: celery -A nivasSaarthi worker -l info
+    volumes:
+      - ./Backend:/home/app/web
+    env_file:
+      - ./Backend/.env.dev
+    environment:
+      - DEBUG=1
+      - REDIS_HOST=redis
+      - DATABASE_URL=postgresql://postgres:postgres@db:5432/nivas_saarthi_dev
+    depends_on:
+      - redis
+      - db
+      - web
+    networks:
+      - app-network
+    restart: unless-stopped
   # Comment this out if not needed at the time or smthn
   # frontend:
   #   build:

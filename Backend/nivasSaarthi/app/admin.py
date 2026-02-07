@@ -3,7 +3,8 @@ from django.contrib.auth.admin import UserAdmin
 from .models import (
     NewUser, ServiceProviderProfile, ServiceRequest, Service, ServiceRating,
     ChatSession, ChatMessage, Notifications, SOSRequest, Blacklist,
-    EmergencyContact, WebhookSubscription, VoiceCall, CallTranscript
+    EmergencyContact, WebhookSubscription, VoiceCall, CallTranscript,
+    NegotiationSession
 )
 
 
@@ -78,22 +79,18 @@ class ServiceProviderProfileAdmin(admin.ModelAdmin):
 
 @admin.register(ServiceRequest)
 class ServiceRequestAdmin(admin.ModelAdmin):
-    list_display = ('id', 'customer', 'service_provider', 'status', 'service_acceptance', 'requested_on')
-    list_filter = ('status', 'service_acceptance', 'requested_on')
-    search_fields = ('customer__phone_number', 'service_provider__phone_number', 'description')
-    readonly_fields = ('id', 'created_at', 'updated_at', 'requested_on')
-    raw_id_fields = ('customer', 'service_provider')
-    date_hierarchy = 'requested_on'
+    list_display = ('id', 'customer', 'service_types', 'status', 'customer_budget', 'providers_contacted', 'offers_received', 'created_at')
+    list_filter = ('status', 'created_at')
+    search_fields = ('customer__phone_number', 'customer__email', 'description')
+    readonly_fields = ('id', 'created_at', 'updated_at', 'task_id', 'providers_contacted', 'offers_received')
+    raw_id_fields = ('customer', 'selected_offer')
+    date_hierarchy = 'created_at'
     
-    actions = ['mark_accepted', 'mark_rejected']
+    actions = ['mark_cancelled']
     
-    @admin.action(description='Mark selected requests as Accepted')
-    def mark_accepted(self, request, queryset):
-        queryset.update(status='ACCEPTED', service_acceptance=True)
-    
-    @admin.action(description='Mark selected requests as Rejected')
-    def mark_rejected(self, request, queryset):
-        queryset.update(status='REJECTED', service_acceptance=False)
+    @admin.action(description='Cancel selected requests')
+    def mark_cancelled(self, request, queryset):
+        queryset.update(status='CANCELLED')
 
 
 @admin.register(Service)
