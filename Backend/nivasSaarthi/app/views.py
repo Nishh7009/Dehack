@@ -48,7 +48,19 @@ def register(request):
         # )
         user.is_verified = True
         user.save()
-        return Response({"message": "User registered successfully", "user_id": user.id}, status=status.HTTP_201_CREATED)
+        refresh = RefreshToken.for_user(user)
+        Notifications.objects.create(
+            user=user,
+            title="Welcome to Nivas Saarthi",
+            message="Your account has been successfully verified.",
+            notification_type = 'info'
+        )
+        return Response({
+            "message": "Registered successfully",
+            "user_id": user.id,
+            "access": str(refresh.access_token),
+            "refresh": str(refresh)
+        }, status=status.HTTP_201_CREATED)
     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 @api_view(['POST'])
