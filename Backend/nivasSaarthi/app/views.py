@@ -9,6 +9,7 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from .models import ROLES, NewUser, Service, ServiceRequest, ServiceProviderProfile, Notifications, SOSRequest, Blacklist, EmergencyContact, VoiceCall, CallTranscript, WebhookSubscription
 from rest_framework.response import Response
 from django.core.mail import send_mail
+from django.db.models import Q
 from rest_framework import status
 import pyotp
 from django.utils import timezone
@@ -20,6 +21,7 @@ import os
 from django.core.files import File
 from django.conf import settings
 from django.views.decorators.csrf import csrf_exempt
+
 
 
 #################################### AUTH VIEWS ####################################
@@ -38,17 +40,8 @@ def register(request):
             password=serializer.validated_data['password']
         )
         user.totp_secret = pyotp.random_base32()
-        user.is_active = False
-        # send_mail(
-        #     subject="Your OTP for Nivas Saarthi Registration",
-        #     message=f"Your OTP code is: {pyotp.TOTP(user.totp_secret).now()}\nThis code will expire in 30 seconds.",
-        #     from_email=os.getenv('EMAIL_SENDER_ID'),
-        #     recipient_list=[user.email],
-        #     fail_silently=False,
-        # )
-        user.is_verified = True
         user.is_active = True
-        user.save()
+        user.is_verified = True
         refresh = RefreshToken.for_user(user)
         Notifications.objects.create(
             user=user,
@@ -56,12 +49,8 @@ def register(request):
             message="Your account has been successfully verified.",
             notification_type = 'info'
         )
-        return Response({
-            "message": "Registered successfully",
-            "user_id": user.id,
-            "access": str(refresh.access_token),
-            "refresh": str(refresh)
-        }, status=status.HTTP_201_CREATED)
+        user.save()
+        return Response({"message": "User registered successfully", "user_id": user.id, "access": str(refresh.access_token), "refresh": str(refresh)}, status=status.HTTP_201_CREATED)
     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 @api_view(['POST'])
@@ -153,11 +142,11 @@ def login_view(request):
     except NewUser.DoesNotExist:
         return Response({"error": "User not found"}, status=status.HTTP_404_NOT_FOUND)
     
-@api_view(['POST'])
+@api_view(['GET'])
 @permission_classes([AllowAny])
 def user_session_details(request):
     user = request.user
-    return Response({"profile_completed": user.profile_completed, "is_verified": user.is_verified}, status=status.HTTP_200_OK)
+    return Response({"profile_completed": user.profile_completed, "is_verified": user.is_verified, "user_id": user.id}, status=status.HTTP_200_OK)
 
 @api_view(['POST'])
 @permission_classes([IsVerifiedAndAuthenticated])
@@ -229,12 +218,59 @@ def resend_totp(request):
 @permission_classes([IsVerifiedAndAuthenticated])
 def profile_completion(request):
     user = request.user
-    serializer = UserRegistrationSerializer(user, data=request.data, partial=True)
-    if serializer.is_valid():
-        serializer.save()
+    if user.profile_completed:
+        return Response({"message": "Profile is already marked as completed"}, status=status.HTTP_200_OK)
+    first_name = request.data.get('first_name')
+    last_name = request.data.get('last_name')
+    city = request.data.get('city')
+    role = request.data.get('role')
+    phone_number = request.data.get('phone_number')
+    address = request.data.get('address')
+    state = request.data.get('state')
+    pincode = request.data.get('pincode')
+    latitude = request.data.get('latitude')
+    longitude = request.data.get('longitude')
+    user.first_name = first_name
+    user.last_name = last_name
+    user.city = city
+    user.role = role
+    user.phone_number = phone_number
+    user.address = address
+    user.state = state
+    user.pincode = pincode
+    if latitude and longitude:
+        user.location = Point(float(longitude), float(latitude), srid=4326)
+    if user.role == ROLES.SERVICE_PROVIDER:
+        bio = request.data.get('bio', '')
+        years_of_experience = request.data.get('years_of_experience', 0)
+        average_rating = 2.5
+        services = request.data.get('services', '')
+        service_provider = ServiceProviderProfile.objects.create(user=user, bio=bio, years_of_experience=years_of_experience, average_rating=average_rating, services=services)
     user.profile_completed = True
     user.save()
-    return Response({"message": "Profile marked as completed"}, status=status.HTTP_200_OK)
+    return Response({"message": "Profile marked as completed", "user_details": {
+        'id': str(user.id),
+        'first_name': user.first_name,
+        'last_name': user.last_name,
+        'email': user.email,
+        'phone_number': user.phone_number,
+        'role': user.role,
+        'city': user.city,
+        'state': user.state,
+        'address': user.address,
+        'pincode': user.pincode,
+        'location': {
+            'latitude': user.location.y if user.location else None,
+            'longitude': user.location.x if user.location else None
+        }
+    }, "provider_details": {
+        'bio': service_provider.bio if hasattr(user, 'service_provider_profile') else '',
+        'years_of_experience': service_provider.years_of_experience if hasattr(user, 'service_provider_profile') else 0,
+        'average_rating': service_provider.average_rating if hasattr(user, 'service_provider_profile') else 0.0,
+        'services': service_provider.get_services_list() if hasattr(user, 'service_provider_profile') else []
+    }}, status=status.HTTP_200_OK)
+    
+
 
 ################################### SERVICE VIEWS ###################################
 @api_view(['GET'])
@@ -364,64 +400,173 @@ def complete_service(request):
 @api_view(['POST'])
 @permission_classes([IsVerifiedAndAuthenticated])
 def request_service(request):
-    customer_id = request.data.get('customer_id')
+    """
+    Create a new service request from customer to provider.
+    
+    Required fields:
+    - provider_id: UUID of the service provider
+    - description: Description of service needed
+    
+    Optional fields:
+    - customer_budget: Customer's budget for negotiation
+    - requested_date: When the service is needed
+    - service_latitude: Latitude of service location
+    - service_longitude: Longitude of service location
+    """
+    # Get authenticated user as customer
+    customer = request.user
+    
+    # Verify user is a customer
+    if customer.role != ROLES.CUSTOMER:
+        return Response(
+            {'message': 'Only customers can request services'},
+            status=status.HTTP_403_FORBIDDEN
+        )
+    
+    # Get request data
     provider_id = request.data.get('provider_id')
     description = request.data.get('description')
     requested_date = request.data.get('requested_date')
-    
-    # Location where the customer wants the service (required for distance validation)
+    customer_budget = request.data.get('customer_budget')
     service_latitude = request.data.get('service_latitude')
     service_longitude = request.data.get('service_longitude')
     
-    if not all([customer_id, provider_id, description]):
-        return Response({'message': 'Customer ID, Provider ID and Description are required'}, status=status.HTTP_400_BAD_REQUEST)
+    # Validate required fields
+    if not all([provider_id, description]):
+        return Response(
+            {'message': 'Provider ID and Description are required'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
     
     try:
-        customer = NewUser.objects.get(id=customer_id, role=ROLES.CUSTOMER)
+        # Get provider
         provider = NewUser.objects.get(id=provider_id, role=ROLES.SERVICE_PROVIDER)
         
-        # Validate distance if location is provided
-        if service_latitude and service_longitude and provider.location:
-            service_location = Point(float(service_longitude), float(service_latitude), srid=4326)
-            # Calculate distance in kilometers
-            distance_m = provider.location.distance(service_location)
-            # Convert to km (geography type returns distance in meters)
-            distance_km = distance_m * 100  # Approximate conversion for geography
+        # Validate distance if service location is provided
+        distance_km = None
+        if service_latitude and service_longitude:
+            if not provider.location:
+                return Response(
+                    {'message': 'Provider location not available for distance calculation'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
             
-            # Use proper distance calculation with geodesic
-            from django.contrib.gis.db.models.functions import Distance as GeoDistance
-            provider_with_dist = NewUser.objects.filter(id=provider_id).annotate(
-                distance=GeoDistance('location', service_location)
-            ).first()
-            
-            if provider_with_dist and provider_with_dist.distance:
-                distance_km = provider_with_dist.distance.km
-                if distance_km > 5:
-                    return Response({
-                        'message': f'Provider is {distance_km:.1f}km away from the service location. Maximum allowed distance is 5km.',
-                        'distance_km': round(distance_km, 2)
-                    }, status=status.HTTP_400_BAD_REQUEST)
-         
+            try:
+                service_location = Point(float(service_longitude), float(service_latitude), srid=4326)
+                
+                # Calculate distance using PostGIS
+                provider_with_dist = NewUser.objects.filter(id=provider_id).annotate(
+                    distance=Distance('location', service_location)
+                ).first()
+                
+                if provider_with_dist and provider_with_dist.distance:
+                    distance_km = provider_with_dist.distance.km
+                    
+                    # Check if within acceptable range (configurable)
+                    MAX_DISTANCE_KM = 50  # You can make this configurable
+                    if distance_km > MAX_DISTANCE_KM:
+                        return Response({
+                            'message': f'Provider is {distance_km:.1f}km away from the service location. Maximum allowed distance is {MAX_DISTANCE_KM}km.',
+                            'distance_km': round(distance_km, 2),
+                            'provider_location': {
+                                'latitude': provider.latitude,
+                                'longitude': provider.longitude
+                            },
+                            'service_location': {
+                                'latitude': service_latitude,
+                                'longitude': service_longitude
+                            }
+                        }, status=status.HTTP_400_BAD_REQUEST)
+                        
+            except (ValueError, TypeError) as e:
+                return Response(
+                    {'message': f'Invalid service location coordinates: {str(e)}'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+        
+        # Parse customer budget if provided
+        if customer_budget:
+            try:
+                customer_budget = Decimal(str(customer_budget))
+            except (ValueError, TypeError):
+                return Response(
+                    {'message': 'Invalid customer_budget format'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+        
+        # Parse requested date if provided
+        if requested_date:
+            from datetime import datetime
+            try:
+                if isinstance(requested_date, str):
+                    requested_date = datetime.fromisoformat(requested_date.replace('Z', '+00:00'))
+            except (ValueError, TypeError):
+                return Response(
+                    {'message': 'Invalid requested_date format. Use ISO format (YYYY-MM-DDTHH:MM:SS)'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+        else:
+            requested_date = timezone.now()
+        
+        # Create service request
         service_request = ServiceRequest.objects.create(
             customer=customer,
             service_provider=provider,
             description=description,
-            requested_on=requested_date if requested_date else timezone.now()
+            requested_on=requested_date,
+            customer_budget=customer_budget,
+            status='PENDING',
+            negotiation_status='NOT_STARTED'
         )
+        
         # Create notification for provider
-        notification = Notifications(
-            user=provider
+        notification_message = (
+            f"New service request from {customer.first_name} {customer.last_name}. "
+            f"Service: {description[:100]}"
         )
-        notification.form_message({
-            'event': 'new_service_request',
-            'customer_name': customer.first_name,
-            'service_description': description
-        })
-        notification.save()
-        return Response({'message': 'Service requested successfully', 'service_request_id': str(service_request.id)}, status=status.HTTP_201_CREATED)
+        if customer_budget:
+            notification_message += f" Budget: ₹{customer_budget}"
+        
+        Notifications.objects.create(
+            user=provider,
+            title="🔔 New Service Request",
+            message=notification_message,
+            notification_type='new_service_request',
+        )
+        
+        # Build response
+        response_data = {
+            'message': 'Service requested successfully',
+            'service_request': {
+                'id': str(service_request.id),
+                'description': service_request.description,
+                'status': service_request.status,
+                'customer_budget': float(customer_budget) if customer_budget else None,
+                'requested_on': service_request.requested_on.isoformat(),
+                'provider': {
+                    'id': str(provider.id),
+                    'name': f"{provider.first_name} {provider.last_name}",
+                    'phone': provider.phone_number,
+                    'city': provider.city
+                }
+            }
+        }
+        
+        if distance_km is not None:
+            response_data['service_request']['distance_km'] = round(distance_km, 2)
+        
+        return Response(response_data, status=status.HTTP_201_CREATED)
+        
     except NewUser.DoesNotExist:
-        return Response({'message': 'Customer or Service Provider not found'}, status=status.HTTP_404_NOT_FOUND)
-
+        return Response(
+            {'message': 'Service Provider not found'},
+            status=status.HTTP_404_NOT_FOUND
+        )
+    except Exception as e:
+        return Response(
+            {'message': f'Error creating service request: {str(e)}'},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
 @api_view(['POST'])
 @permission_classes([IsVerifiedAndAuthenticated])
 def accept_service_request(request):
@@ -436,7 +581,8 @@ def accept_service_request(request):
             customer=service_request.customer,
             service_provider=service_request.service_provider,
             description=service_request.description,
-            requested_on=service_request.requested_on
+            requested_on=service_request.requested_on,
+            negotiated_price=service_request.negotiated_price
         )
         # Create notification for customer
         notification = Notifications.objects.create(
@@ -445,7 +591,8 @@ def accept_service_request(request):
         notification.form_message({
             'event': 'service_request_accepted',
             'service_description': service_request.description,
-            'service_provider_name': service_request.service_provider.first_name
+            'service_provider_name': service_request.service_provider.first_name,
+            'negotiated_offer': f"An offer of ₹{service_request.negotiated_price} has been accepted for your service request." if service_request.negotiated_price else "Your service request has been accepted."
         })
         notification.save()
         service_request.save()
@@ -471,7 +618,7 @@ def reject_service_request(request):
         notification.form_message({
             'event': 'service_request_rejected',
             'service_description': service_request.description,
-            'service_provider_name': service_request.service_provider.first_name
+            'service_provider_name': service_request.service_provider.first_name,
         })
         notification.save()
         return Response({'message': 'Service request rejected'}, status=status.HTTP_200_OK)
@@ -482,21 +629,19 @@ def reject_service_request(request):
 @permission_classes([IsVerifiedAndAuthenticated])
 def get_nearby_providers(request):
     """
-    Get service providers within a radius of a given location.
+    Find service providers near a given location.
     
-    Query params:
-    - latitude: Required. Latitude of the location to search from.
-    - longitude: Required. Longitude of the location to search from.
-    - radius_km: Optional. Search radius in kilometers (default: 5).
-    - service_type: Optional. Filter by service type (comma-separated list).
+    Query Parameters:
+    - latitude: User's latitude coordinate (required)
+    - longitude: User's longitude coordinate (required)
+    - radius_km: Search radius in kilometers (default: 5)
+    - service_type: Comma-separated list of service types to filter by (optional)
     
-    Returns:
-    - providers: List of nearby providers with distance information.
-    - count: Total number of providers found.
+    Example: /api/nearby-providers/?latitude=28.3573131&longitude=75.5881653&radius_km=10&service_type=Plumber
     """
     lat = request.query_params.get('latitude')
     lon = request.query_params.get('longitude')
-    radius_km = float(request.query_params.get('radius_km', 5))
+    radius_km = request.query_params.get('radius_km', 5)
     service_type = request.query_params.get('service_type')
     
     # Validate required parameters
@@ -507,62 +652,73 @@ def get_nearby_providers(request):
         )
     
     try:
-        user_location = Point(float(lon), float(lat), srid=4326)
-    except (ValueError, TypeError):
+        lat = float(lat)
+        lon = float(lon)
+        radius_km = float(radius_km)
+        user_location = Point(lon, lat, srid=4326)
+    except (ValueError, TypeError) as e:
         return Response(
-            {'message': 'Invalid latitude or longitude values.'},
+            {'message': f'Invalid parameter values: {str(e)}'},
             status=status.HTTP_400_BAD_REQUEST
         )
     
-    # Query providers within radius using PostGIS
-    providers = NewUser.objects.filter(
+    # Query providers within radius
+    providers_qs = NewUser.objects.filter(
         role=ROLES.SERVICE_PROVIDER,
         location__isnull=False,
-        location__distance_lte=(user_location, D(km=radius_km))
+        profile_completed=True  # Only show providers with completed profiles
     ).annotate(
         distance=Distance('location', user_location)
+    ).filter(
+        distance__lte=D(km=radius_km)
     ).select_related('service_provider_profile').order_by('distance')
     
     # Filter by service type if specified
     if service_type:
         service_types = [s.strip().lower() for s in service_type.split(',')]
-        filtered_providers = []
-        for p in providers:
-            if hasattr(p, 'service_provider_profile'):
-                provider_services = [s.lower() for s in p.service_provider_profile.get_services_list()]
-                if any(st in provider_services for st in service_types):
-                    filtered_providers.append(p)
-        providers = filtered_providers
+        q_filter = Q()
+        for st in service_types:
+            q_filter |= Q(service_provider_profile__services__icontains=st)
+        providers_qs = providers_qs.filter(q_filter)
     
+    providers_list = list(providers_qs)
+    
+    # Build response data
     providers_data = []
-    for p in providers:
-        provider_data = {
-            'id': str(p.id),
-            'first_name': p.first_name,
-            'last_name': p.last_name,
-            'phone_number': p.phone_number,
-            'city': p.city,
-            'distance_km': round(p.distance.km, 2) if hasattr(p, 'distance') and p.distance else None,
-        }
-        
-        # Add service provider profile data if available
-        if hasattr(p, 'service_provider_profile'):
-            profile = p.service_provider_profile
-            provider_data.update({
-                'average_rating': profile.average_rating,
-                'years_of_experience': profile.years_of_experience,
-                'services': profile.get_services_list(),
-                'bio': profile.bio,
-            })
-        else:
-            provider_data.update({
-                'average_rating': 0,
-                'years_of_experience': 0,
-                'services': [],
-                'bio': '',
-            })
-        
-        providers_data.append(provider_data)
+    for p in providers_list:
+        try:
+            provider_data = {
+                'id': str(p.id),
+                'first_name': p.first_name or '',
+                'last_name': p.last_name or '',
+                'phone_number': p.phone_number or '',
+                'email': p.email or '',
+                'city': p.city or '',
+                'address': p.address or '',
+                'distance_km': round(p.distance.km, 2) if hasattr(p, 'distance') and p.distance else None,
+            }
+            
+            # Add service provider profile data
+            profile = getattr(p, 'service_provider_profile', None)
+            if profile:
+                provider_data.update({
+                    'average_rating': float(profile.average_rating) if profile.average_rating else 0.0,
+                    'years_of_experience': int(profile.years_of_experience) if profile.years_of_experience else 0,
+                    'services': profile.get_services_list(),
+                    'bio': profile.bio or '',
+                })
+            else:
+                provider_data.update({
+                    'average_rating': 0.0,
+                    'years_of_experience': 0,
+                    'services': [],
+                    'bio': '',
+                })
+            
+            providers_data.append(provider_data)
+        except Exception as e:
+            print(f"Error processing provider {p.id}: {str(e)}")
+            continue
     
     return Response({
         'providers': providers_data,
@@ -570,7 +726,6 @@ def get_nearby_providers(request):
         'search_radius_km': radius_km,
         'search_location': {'latitude': lat, 'longitude': lon}
     }, status=status.HTTP_200_OK)
-
 
 ################################### NOTIFICATION VIEWS ###################################
 @api_view(['GET'])

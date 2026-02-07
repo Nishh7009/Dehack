@@ -164,6 +164,7 @@ class Service(models.Model):
     service_provider = models.ForeignKey(NewUser, on_delete=models.CASCADE, related_name='services_provider')
     description = models.TextField()
     service_status = models.CharField(max_length=20, choices=choices, default='IN_PROGRESS') # IN_PROGRESS, COMPLETED, CANCELLED
+    negotiated_price = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
     completion_verification_from_customer = models.BooleanField(default=False)
     completion_verification_from_provider = models.BooleanField(default=False)
     requested_on = models.DateTimeField(auto_now_add=True)
@@ -245,6 +246,8 @@ class Notifications(models.Model):
             self.message = f"Your service request for {context.get('service_description')} has been rejected by {context.get('service_provider_name')}."
         elif context.get('event') == 'service_completed':
             self.message = f"Your service request for {context.get('service_description')} has been marked as completed by {context.get('service_provider_name')}."
+        elif context.get('event') == 'negotiated_offer':
+            self.message = context.get('negotiated_offer')
         else:
             self.message = "You have a new notification."
     def __str__(self):
