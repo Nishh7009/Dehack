@@ -39,13 +39,14 @@ def register(request):
         )
         user.totp_secret = pyotp.random_base32()
         user.is_active = False
-        send_mail(
-            subject="Your OTP for Nivas Saarthi Registration",
-            message=f"Your OTP code is: {pyotp.TOTP(user.totp_secret).now()}\nThis code will expire in 30 seconds.",
-            from_email=os.getenv('EMAIL_SENDER_ID'),
-            recipient_list=[user.email],
-            fail_silently=False,
-        )
+        # send_mail(
+        #     subject="Your OTP for Nivas Saarthi Registration",
+        #     message=f"Your OTP code is: {pyotp.TOTP(user.totp_secret).now()}\nThis code will expire in 30 seconds.",
+        #     from_email=os.getenv('EMAIL_SENDER_ID'),
+        #     recipient_list=[user.email],
+        #     fail_silently=False,
+        # )
+        user.is_verified = True
         user.save()
         return Response({"message": "User registered successfully", "user_id": user.id}, status=status.HTTP_201_CREATED)
     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
