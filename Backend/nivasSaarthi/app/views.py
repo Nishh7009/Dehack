@@ -1742,10 +1742,7 @@ def get_request_offers(request, request_id):
         service_request = ServiceRequest.objects.get(id=request_id, customer=request.user)
         
         # Get all successful negotiations
-        sessions = service_request.negotiations.filter(
-            status='completed',
-            outcome='agreed'
-        ).order_by('current_offer')  # Sort by price, lowest first
+        sessions = service_request.negotiations.all().order_by('current_offer')  # Sort by price, lowest first
         
         offers = []
         for session in sessions:
@@ -1765,7 +1762,9 @@ def get_request_offers(request, request_id):
                     },
                     'offer_price': float(session.current_offer),
                     'message_count': session.message_count,
-                    'created_at': session.created_at.isoformat()
+                    'created_at': session.created_at.isoformat(),
+                    'status': session.status,
+                    'outcome': session.outcome if session.status == 'completed' else None
                 })
             except NewUser.DoesNotExist:
                 offers.append({
