@@ -48,6 +48,20 @@ services:
     networks:
       - app-network
     restart: unless-stopped
+  
+  telegram_bot:
+    build:
+      context: ./Backend
+      dockerfile: Dockerfile
+    container_name: nivas_saarthi_telegram_bot_dev
+    command: python manage.py run_telegram_bot
+    volumes:
+      - ./Backend:/home/app/web
+    env_file:
+      - ./Backend/.env.dev
+    restart: always
+    depends_on:
+      - web
 
   celery:
     build:

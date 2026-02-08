@@ -270,3 +270,22 @@ class CallTranscriptAdmin(admin.ModelAdmin):
     @admin.display(description='Text Preview')
     def text_preview(self, obj):
         return obj.original_text[:50] + '...' if len(obj.original_text) > 50 else obj.original_text
+
+
+@admin.register(NegotiationSession)
+class NegotiationSessionAdmin(admin.ModelAdmin):
+    list_display = ('id', 'service_request', 'status', 'created_at', 'updated_at')
+    list_filter = ('status', 'created_at')
+    search_fields = ('service_request__customer__phone_number', 'provider__phone_number')
+    readonly_fields = ('id', 'created_at')
+    raw_id_fields = ['service_request']
+    date_hierarchy = 'created_at'
+
+    @admin.display(description='Negotiation Status')
+    def status(self, obj):
+        if obj.is_accepted:
+            return 'Accepted'
+        elif obj.is_rejected:
+            return 'Rejected'
+        else:
+            return 'In Progress'

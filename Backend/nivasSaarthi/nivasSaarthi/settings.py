@@ -51,6 +51,11 @@ INSTALLED_APPS = [
     'channels',
 ]
 
+
+TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
+TELEGRAM_WEBHOOK_URL = os.getenv('TELEGRAM_WEBHOOK_URL')
+TELEGRAM_BOT_USERNAME = os.getenv('TELEGRAM_BOT_USERNAME')
+
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': [
         'rest_framework_simplejwt.authentication.JWTAuthentication',

@@ -841,7 +841,7 @@ def get_nearby_providers(request):
         distance=Distance('location', user_location)
     ).filter(
         distance__lte=D(km=radius_km)
-    ).select_related('service_provider_profile').order_by('average_rating', 'distance')
+    ).select_related('service_provider_profile').order_by('service_provider_profile__average_rating', 'distance')
     
     # Filter by service type if specified
     if service_type:
@@ -1409,77 +1409,77 @@ def whatsapp_webhook(request):
     return HttpResponse(str(twiml), content_type='text/xml')
 
 
-@api_view(['POST'])
-@permission_classes([IsVerifiedAndAuthenticated])
-def start_negotiation(request):
-    """
-    Start an AI negotiation for a service request.
+# @api_view(['POST'])
+# @permission_classes([IsVerifiedAndAuthenticated])
+# def start_negotiation(request):
+#     """
+#     Start an AI negotiation for a service request.
     
-    Request body:
-    - service_request_id: UUID of the ServiceRequest
-    - max_budget: Maximum price the customer is willing to pay
-    - min_acceptable: Price at which to auto-accept (optional, defaults to 80% of max)
-    """
-    from . import whatsapp_negotiator
-    from .models import NegotiationSession
-    from decimal import Decimal
+#     Request body:
+#     - service_request_id: UUID of the ServiceRequest
+#     - max_budget: Maximum price the customer is willing to pay
+#     - min_acceptable: Price at which to auto-accept (optional, defaults to 80% of max)
+#     """
+#     from . import whatsapp_negotiator
+#     from .models import NegotiationSession
+#     from decimal import Decimal
     
-    service_request_id = request.data.get('service_request_id')
-    max_budget = request.data.get('max_budget')
-    min_acceptable = request.data.get('min_acceptable')
+#     service_request_id = request.data.get('service_request_id')
+#     max_budget = request.data.get('max_budget')
+#     min_acceptable = request.data.get('min_acceptable')
     
-    if not service_request_id or not max_budget:
-        return Response(
-            {'message': 'service_request_id and max_budget are required'},
-            status=status.HTTP_400_BAD_REQUEST
-        )
+#     if not service_request_id or not max_budget:
+#         return Response(
+#             {'message': 'service_request_id and max_budget are required'},
+#             status=status.HTTP_400_BAD_REQUEST
+#         )
     
-    try:
-        max_budget = Decimal(str(max_budget))
-        # Default min_acceptable to 80% of max_budget if not provided
-        if min_acceptable:
-            min_acceptable = Decimal(str(min_acceptable))
-        else:
-            min_acceptable = max_budget * Decimal('0.8')
+#     try:
+#         max_budget = Decimal(str(max_budget))
+#         # Default min_acceptable to 80% of max_budget if not provided
+#         if min_acceptable:
+#             min_acceptable = Decimal(str(min_acceptable))
+#         else:
+#             min_acceptable = max_budget * Decimal('0.8')
         
-        # Verify the user owns this request
-        service_request = ServiceRequest.objects.get(id=service_request_id)
-        if service_request.customer != request.user:
-            return Response(
-                {'message': 'You can only negotiate your own service requests'},
-                status=status.HTTP_403_FORBIDDEN
-            )
+#         # Verify the user owns this request
+#         service_request = ServiceRequest.objects.get(id=service_request_id)
+#         if service_request.customer != request.user:
+#             return Response(
+#                 {'message': 'You can only negotiate your own service requests'},
+#                 status=status.HTTP_403_FORBIDDEN
+#             )
         
-        # Check if there's already an active negotiation
-        active_session = NegotiationSession.objects.filter(
-            service_request=service_request,
-            status='active'
-        ).first()
+#         # Check if there's already an active negotiation
+#         active_session = NegotiationSession.objects.filter(
+#             service_request=service_request,
+#             status='active'
+#         ).first()
         
-        if active_session:
-            return Response(
-                {'message': 'There is already an active negotiation for this request',
-                 'session_id': str(active_session.id)},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+#         if active_session:
+#             return Response(
+#                 {'message': 'There is already an active negotiation for this request',
+#                  'session_id': str(active_session.id)},
+#                 status=status.HTTP_400_BAD_REQUEST
+#             )
         
-        # Start the negotiation
-        session = whatsapp_negotiator.start_negotiation(
-            service_request_id=service_request_id,
-            max_budget=max_budget,
-            min_acceptable=min_acceptable
-        )
+#         # Start the negotiation
+#         session = whatsapp_negotiator.start_negotiation(
+#             service_request_id=service_request_id,
+#             max_budget=max_budget,
+#             min_acceptable=min_acceptable
+#         )
         
-        return Response({
-            'message': 'Negotiation started successfully',
-            'session_id': str(session.id),
-            'expires_at': session.expires_at.isoformat()
-        }, status=status.HTTP_201_CREATED)
+#         return Response({
+#             'message': 'Negotiation started successfully',
+#             'session_id': str(session.id),
+#             'expires_at': session.expires_at.isoformat()
+#         }, status=status.HTTP_201_CREATED)
         
-    except ServiceRequest.DoesNotExist:
-        return Response({'message': 'Service request not found'}, status=status.HTTP_404_NOT_FOUND)
-    except Exception as e:
-        return Response({'message': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+#     except ServiceRequest.DoesNotExist:
+#         return Response({'message': 'Service request not found'}, status=status.HTTP_404_NOT_FOUND)
+#     except Exception as e:
+#         return Response({'message': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 @api_view(['GET'])
@@ -2000,6 +2000,7 @@ def confirm_payment_received(request, token):
 
 ####################################### TELEGRAM NEGOTIATION API #######################################
 from app.telegram_service import telegram_bot
+from decimal import Decimal
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
