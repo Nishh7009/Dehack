@@ -681,11 +681,17 @@ def request_service(request):
     from .telegram_service import telegram_bot
     
     description = request.data.get('description')
-    service_types = request.data.get('service_types')  # CSV string
+    service_types = request.data.get('service_types')
     latitude = request.data.get('latitude')
     longitude = request.data.get('longitude')
     customer_budget = request.data.get('customer_budget')
     requested_date = request.data.get('requested_date')
+    
+    # Normalize service_types - handle list, quoted strings, etc.
+    if isinstance(service_types, list):
+        service_types = ', '.join(str(s).strip().strip('"\'') for s in service_types)
+    elif isinstance(service_types, str):
+        service_types = service_types.strip().strip('"\'')
     
     # Validate required fields
     if not all([description, service_types, latitude, longitude, customer_budget]):
@@ -724,7 +730,7 @@ def request_service(request):
         )
         
         # Get customer location for provider search
-        user_location = request.user.location
+        user_location = Point(float(longitude), float(latitude), srid=4326)
         if user_location is None:
             return Response({
                 'message': 'Customer location not found. Please complete your profile with location details.'
