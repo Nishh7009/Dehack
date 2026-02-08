@@ -39,6 +39,10 @@ class TelegramNegotiationBot:
         self.application.add_handler(CallbackQueryHandler(self.handle_reject, pattern="^reject_"))
         self.application.add_handler(CallbackQueryHandler(self.handle_counter, pattern="^counter_"))
         
+        # Handle payment confirmation callbacks
+        self.application.add_handler(CallbackQueryHandler(self.handle_payment_confirmed, pattern="^confirm_payment_"))
+        self.application.add_handler(CallbackQueryHandler(self.handle_payment_denied, pattern="^deny_payment_"))
+        
         # Handle contact sharing (phone number)
         self.application.add_handler(MessageHandler(
             filters.CONTACT, 
@@ -508,6 +512,100 @@ Your goal:
             response = await self.translate_message(response, 'en', target_lang)
         
         await query.edit_message_text(f"💬 {response}")
+
+    async def handle_payment_confirmed(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle payment confirmed button press"""
+        from app.models import Service, Notifications
+        
+        query = update.callback_query
+        await query.answer()
+        
+        service_id = query.data.replace("confirm_payment_", "")
+        chat_id = str(update.effective_chat.id)
+        
+        # Find the service
+        service = await sync_to_async(Service.objects.filter(id=service_id).first)()
+        
+        if not service:
+            await query.edit_message_text("❌ Service not found.")
+            return
+        
+        # Verify this provider owns the service
+        provider = await sync_to_async(NewUser.objects.filter(telegram_chat_id=chat_id).first)()
+        
+        if not provider or service.service_provider_id != provider.id:
+            await query.edit_message_text("❌ Unauthorized - you are not the service provider.")
+            return
+        
+        # Update payment status to CONFIRMED
+        service.payment_status = 'CONFIRMED'
+        service.completion_verification_from_provider = True
+        await sync_to_async(service.save)()
+        
+        # Check if both verified - mark service as completed
+        if service.completion_verification_from_customer and service.completion_verification_from_provider:
+            service.service_status = 'COMPLETED'
+            await sync_to_async(service.save)()
+        
+        # Notify customer
+        await sync_to_async(Notifications.objects.create)(
+            user=service.customer,
+            title="Payment Confirmed! ✅",
+            message=f"{provider.first_name} has confirmed receiving your payment of ₹{service.agreed_price or 'N/A'}.",
+            notification_type='payment_confirmed'
+        )
+        
+        # Send confirmation to provider
+        target_lang = provider.preferred_language if provider else 'en'
+        response = "✅ Payment confirmed! Thank you for confirming receipt."
+        if target_lang != 'en':
+            response = await self.translate_message(response, 'en', target_lang)
+        
+        await query.edit_message_text(response)
+
+    async def handle_payment_denied(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle payment denied button press"""
+        from app.models import Service, Notifications
+        
+        query = update.callback_query
+        await query.answer()
+        
+        service_id = query.data.replace("deny_payment_", "")
+        chat_id = str(update.effective_chat.id)
+        
+        # Find the service
+        service = await sync_to_async(Service.objects.filter(id=service_id).first)()
+        
+        if not service:
+            await query.edit_message_text("❌ Service not found.")
+            return
+        
+        # Verify this provider owns the service
+        provider = await sync_to_async(NewUser.objects.filter(telegram_chat_id=chat_id).first)()
+        
+        if not provider or service.service_provider_id != provider.id:
+            await query.edit_message_text("❌ Unauthorized - you are not the service provider.")
+            return
+        
+        # Revert payment status back to PENDING
+        service.payment_status = 'PENDING'
+        await sync_to_async(service.save)()
+        
+        # Notify customer that payment was not received
+        await sync_to_async(Notifications.objects.create)(
+            user=service.customer,
+            title="Payment Issue ⚠️",
+            message=f"{provider.first_name} has indicated they did not receive your payment for: {service.description}. Please check and try again.",
+            notification_type='payment_issue'
+        )
+        
+        # Send confirmation to provider
+        target_lang = provider.preferred_language if provider else 'en'
+        response = "⚠️ Noted. The customer has been notified that payment was not received."
+        if target_lang != 'en':
+            response = await self.translate_message(response, 'en', target_lang)
+        
+        await query.edit_message_text(response)
 
     async def translate_message(self, text: str, source_lang: str, target_lang: str) -> str:
         """Translate text using Sarvam AI"""

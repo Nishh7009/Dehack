@@ -72,6 +72,7 @@ urlpatterns = [
     # Unified services endpoint
     path('my-services/', views.get_services, name='get_services'),
     path('my-services/<uuid:service_id>/complete/', views.mark_service_complete, name='mark_service_complete'),
+    path('my-services/<uuid:service_id>/mark-payment/', views.mark_payment_made, name='mark_payment_made'),
     
     # Telegram endpoints
     path('negotiation/start/', views.start_negotiation, name='start_negotiation'),
