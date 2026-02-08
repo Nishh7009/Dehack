@@ -3,7 +3,7 @@ Celery tasks for automated multi-provider negotiation.
 """
 
 from linecache import cache
-from .models import NewUser
+from .models import NewUser, NegotiationSession, ServiceRequest, Notifications, ROLES
 from celery import shared_task
 from django.conf import settings
 from django.contrib.gis.geos import Point
@@ -12,9 +12,50 @@ from django.utils import timezone
 from datetime import timedelta
 from decimal import Decimal
 import logging
-from telegram import Bot
+import requests
+import os
 
 logger = logging.getLogger(__name__)
+
+
+@shared_task(bind=True, max_retries=3)
+def send_telegram_notification(self, user_id: str, title: str, message: str, session_id: str = None):
+    """
+    Send notification to user via Telegram bot.
+    Retries up to 3 times on failure.
+    """
+    
+    try:
+        user = NewUser.objects.get(id=user_id)
+        
+        if not user.telegram_chat_id:
+            logger.warning(f"User {user_id} has no Telegram chat ID")
+            return {'status': 'skipped', 'message': 'No Telegram chat ID'}
+        
+        bot_token = os.getenv('TELEGRAM_BOT_TOKEN')
+        url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+        formatted_message = f"*{title}*\n\n{message}"
+        if session_id:
+            formatted_message += f"\n\nSession ID: {session_id}"
+        
+        response = requests.post(url, json={
+            'chat_id': user.telegram_chat_id,
+            'text': formatted_message,
+            'parse_mode': 'Markdown'
+        })
+        
+        if response.status_code == 200:
+            logger.info(f"Telegram notification sent to user {user_id}")
+            return {'status': 'sent', 'user_id': user_id}
+        else:
+            raise Exception(f"Telegram API error: {response.text}")
+        
+    except NewUser.DoesNotExist:
+        logger.error(f"User {user_id} not found")
+        return {'status': 'error', 'message': 'User not found'}
+    except Exception as exc:
+        logger.error(f"Failed to send Telegram notification: {exc}")
+        self.retry(exc=exc, countdown=60)
 
 
 @shared_task(bind=True, max_retries=3)
@@ -25,12 +66,13 @@ def negotiate_with_providers(self, service_request_id: str):
     This task:
     1. Finds providers within 5km matching ANY of the service types
     2. Creates a NegotiationSession for each provider
-    3. Sends initial WhatsApp messages to all providers
-    4. Updates progress tracking
-    5. The webhook handles responses asynchronously
+    3. For providers with Telegram - sends negotiation request via Telegram
+    4. For providers without Telegram - creates a notification
+    5. Updates progress tracking
     """
-    from .models import ServiceRequest, NegotiationSession, NewUser, ServiceProviderProfile
-    from .whatsapp_negotiator import send_whatsapp_message
+    from .models import ServiceRequest, NegotiationSession, NewUser, ServiceProviderProfile, Notifications
+    from app import sarvam_service
+    import requests
     
     try:
         service_request = ServiceRequest.objects.get(id=service_request_id)
@@ -52,40 +94,101 @@ def negotiate_with_providers(self, service_request_id: str):
         return {'status': 'no_providers', 'message': 'No matching providers found nearby'}
     
     # Expiry time for all sessions
-    expires_at = timezone.now() + timedelta(hours=settings.NEGOTIATION_TIMEOUT_HOURS)
+    expires_at = timezone.now() + timedelta(hours=24)
     
     sessions_created = 0
+    telegram_sent = 0
+    notifications_sent = 0
     
-    for provider in providers[:settings.NEGOTIATION_MAX_PROVIDERS]:
-        # Skip if no phone number
-        if not provider.phone_number:
-            logger.warning(f"Provider {provider.id} has no phone number, skipping")
-            continue
-        
-        # Create negotiation session
-        session = NegotiationSession.objects.create(
-            service_request=service_request,
-            provider_phone=provider.phone_number,
-            max_price=service_request.customer_budget,
-            expires_at=expires_at
-        )
-        
-        # Build and send initial message
-        initial_message = build_initial_message_for_provider(
-            service_request=service_request,
-            provider=provider,
-            budget=service_request.customer_budget
-        )
-        
-        if send_whatsapp_message(provider.phone_number, initial_message):
-            session.add_message('assistant', initial_message)
+    # Budget calculations
+    max_price = service_request.customer_budget
+    min_acceptable = max_price * Decimal('0.7')  # 70% of budget as minimum acceptable
+    
+    bot_token = os.getenv('TELEGRAM_BOT_TOKEN')
+    
+    for provider in providers[:10]:  # Limit to 10 providers
+        try:
+            # Determine the identifier - use telegram_chat_id if available, else phone
+            provider_identifier = provider.telegram_chat_id if provider.telegram_chat_id else provider.phone_number
+            
+            if not provider_identifier:
+                logger.warning(f"Provider {provider.id} has no phone or telegram, skipping")
+                continue
+            
+            # Check for existing active session
+            existing = NegotiationSession.objects.filter(
+                service_request=service_request,
+                provider_phone=provider_identifier,
+                status='active'
+            ).first()
+            
+            if existing:
+                logger.info(f"Active session already exists for provider {provider.id}")
+                continue
+            
+            # Create negotiation session
+            session = NegotiationSession.objects.create(
+                service_request=service_request,
+                provider_phone=provider_identifier,
+                max_price=max_price,
+                min_acceptable=min_acceptable,
+                status='active',
+                expires_at=expires_at
+            )
             sessions_created += 1
-            logger.info(f"Started negotiation with provider {provider.id}")
-        else:
-            session.status = 'failed'
-            session.outcome = 'no_deal'
-            session.save()
-            logger.error(f"Failed to send WhatsApp to provider {provider.id}")
+            
+            # Format service types
+            service_types = service_request.service_types
+            if isinstance(service_types, list):
+                service_types_str = ', '.join(service_types)
+            else:
+                service_types_str = str(service_types)
+            
+            # Build message
+            message = (
+                f"🔔 New Service Request\n\n"
+                f"Service: {service_types_str}\n"
+                f"Description: {service_request.description}\n"
+                f"Budget Range: ₹{min_acceptable} - ₹{max_price}\n\n"
+                f"Please reply with your price offer to start negotiation."
+            )
+            
+            # If provider has Telegram, send via Telegram
+            if provider.telegram_chat_id:
+                # Translate message to provider's language
+                target_lang = provider.preferred_language or 'en'
+                if target_lang != 'en':
+                    try:
+                        message = sarvam_service.translate_text(message, 'en', target_lang)
+                    except Exception as e:
+                        logger.error(f"Translation error: {e}")
+                
+                # Send via Telegram API
+                url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+                response = requests.post(url, json={
+                    'chat_id': provider.telegram_chat_id,
+                    'text': message
+                })
+                
+                if response.status_code == 200:
+                    telegram_sent += 1
+                    logger.info(f"Telegram message sent to provider {provider.id}")
+                else:
+                    logger.error(f"Failed to send Telegram to {provider.id}: {response.text}")
+            else:
+                # Create in-app notification for providers without Telegram
+                Notifications.objects.create(
+                    user=provider,
+                    title="New Service Request",
+                    message=f"New request for {service_types_str}. Budget: ₹{max_price}. Open app to respond.",
+                    notification_type='service_request'
+                )
+                notifications_sent += 1
+                logger.info(f"Notification created for provider {provider.id}")
+                
+        except Exception as e:
+            logger.error(f"Error processing provider {provider.id}: {e}")
+            continue
     
     # Update progress tracking
     service_request.providers_contacted = sessions_created
@@ -98,15 +201,11 @@ def negotiate_with_providers(self, service_request_id: str):
     service_request.save()
     logger.info(f"Started {sessions_created} negotiations for request {service_request_id}")
     
-    # Schedule a task to check for completion
-    check_negotiation_status.apply_async(
-        args=[service_request_id],
-        countdown=settings.NEGOTIATION_TIMEOUT_HOURS * 3600  # Check after timeout
-    )
-    
     return {
         'status': 'started',
-        'providers_contacted': sessions_created,
+        'sessions_created': sessions_created,
+        'telegram_sent': telegram_sent,
+        'notifications_sent': notifications_sent,
         'expires_at': expires_at.isoformat()
     }
 
