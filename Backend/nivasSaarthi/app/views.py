@@ -2348,6 +2348,7 @@ def mark_payment_made(request, service_id):
     
     # Update payment status to PAID (awaiting provider confirmation)
     service.payment_status = 'PAID'
+    service.service_status = 'COMPLETED'
     service.save()
     
     # Get the provider
