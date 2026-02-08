@@ -2385,8 +2385,12 @@ def mark_payment_made(request, service_id):
             'notification_method': 'in-app'
         })
     
-    # Send Telegram message with inline buttons
+    # Send Telegram message with confirmation link (like WhatsApp flow)
     bot_token = os.getenv('TELEGRAM_BOT_TOKEN')
+    
+    # Build confirmation URL
+    base_url = request.build_absolute_uri('/').rstrip('/')
+    confirm_url = f"{base_url}/api/confirm-payment/{token}/"
     
     # Build message
     message = f"""💰 Payment Notification
@@ -2396,11 +2400,11 @@ def mark_payment_made(request, service_id):
 📝 Service: {service.description}
 💵 Amount: ₹{service.agreed_price or 'N/A'}
 
-Did you receive this payment?"""
-    
-    # Button text in English
-    yes_button_text = "✅ Yes, I received payment"
-    no_button_text = "❌ No, I didn't receive it"
+Please confirm you received the payment by clicking here:
+{confirm_url}
+
+Thank you!
+- NivasSaarthi"""
     
     # Translate if provider has different language preference
     target_lang = provider.preferred_language or 'en'
@@ -2409,31 +2413,14 @@ Did you receive this payment?"""
             translated_msg = sarvam_service.translate_text(message, 'en', target_lang)
             if translated_msg:
                 message = translated_msg
-            
-            # Translate button text
-            translated_yes = sarvam_service.translate_text(yes_button_text, 'en', target_lang)
-            translated_no = sarvam_service.translate_text(no_button_text, 'en', target_lang)
-            if translated_yes:
-                yes_button_text = translated_yes
-            if translated_no:
-                no_button_text = translated_no
         except Exception as e:
             print(f"Translation error: {e}")
-    
-    # Create inline keyboard with confirm/deny buttons
-    inline_keyboard = {
-        "inline_keyboard": [[
-            {"text": yes_button_text, "callback_data": f"confirm_payment_{service.id}"},
-            {"text": no_button_text, "callback_data": f"deny_payment_{service.id}"}
-        ]]
-    }
     
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
     try:
         response = http_requests.post(url, json={
             'chat_id': provider.telegram_chat_id,
-            'text': message,
-            'reply_markup': inline_keyboard
+            'text': message
         })
         
         if response.status_code == 200:
@@ -2468,5 +2455,3 @@ Did you receive this payment?"""
             'service_id': str(service.id),
             'payment_status': service.payment_status
         })
-
-
