@@ -7,7 +7,7 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from .permissions import IsVerifiedAndAuthenticated
 from rest_framework_simplejwt.tokens import RefreshToken
-from .models import ROLES, NewUser, Service, ServiceRequest, ServiceRating, ServiceProviderProfile, Notifications, SOSRequest, Blacklist, EmergencyContact, VoiceCall, CallTranscript, WebhookSubscription
+from .models import ROLES, NewUser, Service, ServiceRequest, NegotiationSession, ServiceRating, ServiceProviderProfile, Notifications, SOSRequest, Blacklist, EmergencyContact, VoiceCall, CallTranscript, WebhookSubscription
 from rest_framework.response import Response
 from django.core.mail import send_mail
 from django.db.models import Q
@@ -1996,3 +1996,185 @@ def confirm_payment_received(request, token):
         'service_status': service.service_status,
         'payment_status': service.payment_status
     })
+
+
+####################################### TELEGRAM NEGOTIATION API #######################################
+from app.telegram_service import telegram_bot
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def start_negotiation(request):
+    """
+    Customer initiates AI negotiation with a provider via Telegram
+    """
+    service_request_id = request.data.get('service_request_id')
+    provider_id = request.data.get('provider_id')
+    max_price = request.data.get('max_price')
+    min_acceptable = request.data.get('min_acceptable')
+    
+    # Validation
+    if not all([service_request_id, provider_id, max_price, min_acceptable]):
+        return Response({
+            'message': 'service_request_id, provider_id, max_price, and min_acceptable are required'
+        }, status=status.HTTP_400_BAD_REQUEST)
+    
+    try:
+        max_price = Decimal(max_price)
+        min_acceptable = Decimal(min_acceptable)
+        
+        if min_acceptable > max_price:
+            return Response({
+                'message': 'min_acceptable cannot be greater than max_price'
+            }, status=status.HTTP_400_BAD_REQUEST)
+            
+    except (ValueError, TypeError):
+        return Response({
+            'message': 'Invalid price format'
+        }, status=status.HTTP_400_BAD_REQUEST)
+    
+    try:
+        service_request = ServiceRequest.objects.get(
+            id=service_request_id,
+            customer=request.user
+        )
+        
+        provider_profile = ServiceProviderProfile.objects.get(user__id=provider_id)
+        provider = provider_profile.user
+        
+        # Check if provider has Telegram chat_id
+        if not hasattr(provider, 'telegram_chat_id') or not provider.telegram_chat_id:
+            return Response({
+                'message': 'Provider has not linked their Telegram account'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Check for existing active negotiation
+        existing = NegotiationSession.objects.filter(
+            service_request=service_request,
+            telegram_chat_id=provider.telegram_chat_id,
+            status='active'
+        ).first()
+        
+        if existing:
+            return Response({
+                'message': 'Active negotiation already exists',
+                'session_id': str(existing.id)
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Create negotiation session
+        session = NegotiationSession.objects.create(
+            service_request=service_request,
+            platform='telegram',
+            telegram_chat_id=provider.telegram_chat_id,
+            telegram_username=getattr(provider, 'telegram_username', None),
+            max_price=max_price,
+            min_acceptable=min_acceptable,
+            status='active',
+            expires_at=timezone.now() + timedelta(hours=24)
+        )
+        
+        # Send initial message via Telegram (async)
+        async def send_initial_message():
+            await telegram_bot.send_negotiation_request(session)
+        
+        # Run async function
+        asyncio.run(send_initial_message())
+        
+        return Response({
+            'message': 'Negotiation started',
+            'session_id': str(session.id),
+            'provider': {
+                'id': str(provider.id),
+                'username': provider.username,
+                'telegram_username': provider.telegram_username
+            },
+            'expires_at': session.expires_at.isoformat()
+        }, status=status.HTTP_201_CREATED)
+        
+    except ServiceRequest.DoesNotExist:
+        return Response({
+            'message': 'Service request not found'
+        }, status=status.HTTP_404_NOT_FOUND)
+    except ServiceProviderProfile.DoesNotExist:
+        return Response({
+            'message': 'Provider not found'
+        }, status=status.HTTP_404_NOT_FOUND)
+    except Exception as e:
+        return Response({
+            'message': f'An error occurred: {str(e)}'
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_negotiation_status(request, session_id):
+    """
+    Get current status of a negotiation session
+    """
+    try:
+        session = NegotiationSession.objects.get(id=session_id)
+        
+        # Check authorization
+        if session.service_request.customer != request.user:
+            return Response({
+                'message': 'Unauthorized'
+            }, status=status.HTTP_403_FORBIDDEN)
+        
+        return Response({
+            'session_id': str(session.id),
+            'status': session.status,
+            'outcome': session.outcome,
+            'current_offer': str(session.current_offer) if session.current_offer else None,
+            'counter_offer': str(session.counter_offer) if session.counter_offer else None,
+            'message_count': session.message_count,
+            'conversation_history': session.conversation_history,
+            'expires_at': session.expires_at.isoformat(),
+            'is_expired': session.is_expired()
+        }, status=status.HTTP_200_OK)
+        
+    except NegotiationSession.DoesNotExist:
+        return Response({
+            'message': 'Negotiation session not found'
+        }, status=status.HTTP_404_NOT_FOUND)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def cancel_negotiation(request, session_id):
+    """
+    Customer cancels active negotiation
+    """
+    try:
+        session = NegotiationSession.objects.get(id=session_id)
+        
+        if session.service_request.customer != request.user:
+            return Response({
+                'message': 'Unauthorized'
+            }, status=status.HTTP_403_FORBIDDEN)
+        
+        if session.status != 'active':
+            return Response({
+                'message': 'Cannot cancel inactive negotiation'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        session.status = 'completed'
+        session.outcome = 'cancelled'
+        session.save()
+        
+        # Notify provider via Telegram
+        async def notify_provider():
+            bot = Bot(token=settings.TELEGRAM_BOT_TOKEN)
+            await bot.send_message(
+                chat_id=session.telegram_chat_id,
+                text="The customer has cancelled this negotiation request."
+            )
+        
+        asyncio.run(notify_provider())
+        
+        return Response({
+            'message': 'Negotiation cancelled'
+        }, status=status.HTTP_200_OK)
+        
+    except NegotiationSession.DoesNotExist:
+        return Response({
+            'message': 'Negotiation session not found'
+        }, status=status.HTTP_404_NOT_FOUND)

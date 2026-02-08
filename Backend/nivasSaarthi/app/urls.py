@@ -58,11 +58,11 @@ urlpatterns = [
     path('chat/list/', views.get_chat_list, name='get_chat_list'),
 
     # WhatsApp Negotiation endpoints
-    path('whatsapp/webhook/', views.whatsapp_webhook, name='whatsapp_webhook'),
-    path('negotiations/start/', views.start_negotiation, name='start_negotiation'),
-    path('negotiations/<uuid:session_id>/status/', views.get_negotiation_status, name='negotiation_status'),
-    path('negotiations/<uuid:session_id>/accept/', views.accept_negotiated_offer, name='accept_negotiation'),
-    path('negotiations/<uuid:session_id>/reject/', views.reject_negotiated_offer, name='reject_negotiation'),
+    # path('whatsapp/webhook/', views.whatsapp_webhook, name='whatsapp_webhook'),
+    # path('negotiations/start/', views.start_negotiation, name='start_negotiation'),
+    # path('negotiations/<uuid:session_id>/status/', views.get_negotiation_status, name='negotiation_status'),
+    # path('negotiations/<uuid:session_id>/accept/', views.accept_negotiated_offer, name='accept_negotiation'),
+    # path('negotiations/<uuid:session_id>/reject/', views.reject_negotiated_offer, name='reject_negotiation'),
     
     # Multi-provider negotiation endpoints
     path('requests/<uuid:request_id>/status/', views.get_request_status, name='request_status'),
@@ -72,6 +72,11 @@ urlpatterns = [
     # Unified services endpoint
     path('my-services/', views.get_services, name='get_services'),
     path('my-services/<uuid:service_id>/complete/', views.mark_service_complete, name='mark_service_complete'),
+    
+    # Telegram endpoints
+    path('negotiation/start/', views.start_negotiation, name='start_negotiation'),
+    path('negotiation/<uuid:session_id>/', views.get_negotiation_status, name='negotiation_status'),
+    path('negotiation/<uuid:session_id>/cancel/', views.cancel_negotiation, name='cancel_negotiation'),
     
     # Public payment confirmation
     path('confirm-payment/<str:token>/', views.confirm_payment_received, name='confirm_payment_received'),
