@@ -86,6 +86,10 @@ class NewUser(AbstractUser):
     totp_secret = models.CharField(max_length=32, blank=True, null=True)
     profile_completed = models.BooleanField(default=False)
     
+    # Telegram Integration
+    telegram_chat_id = models.CharField(max_length=50, blank=True, null=True, unique=True)
+    telegram_username = models.CharField(max_length=100, blank=True, null=True)
+    
     def save(self, *args, **kwargs):
         # Auto-populate location PointField from latitude/longitude
         if self.latitude is not None and self.longitude is not None:

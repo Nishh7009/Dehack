@@ -1,5 +1,6 @@
 import datetime
 from django.http import HttpResponse
+from .tasks import send_telegram_invitation
 from app.utils import call_helpers, chat_helpers
 from app import twilio_service
 from .serializers import UserRegistrationSerializer, UserBaseRegistrationSerializer
@@ -247,6 +248,7 @@ def profile_completion(request):
         average_rating = 2.5
         services = request.data.get('services', '')
         service_provider = ServiceProviderProfile.objects.create(user=user, bio=bio, years_of_experience=years_of_experience, average_rating=average_rating, services=services)
+        send_telegram_invitation.delay(str(user.id))
     user.profile_completed = True
     user.save()
     return Response({"message": "Profile marked as completed", "user_details": {
@@ -268,6 +270,7 @@ def profile_completion(request):
         'bio': service_provider.bio if hasattr(user, 'service_provider_profile') else '',
         'years_of_experience': service_provider.years_of_experience if hasattr(user, 'service_provider_profile') else 0,
         'average_rating': service_provider.average_rating if hasattr(user, 'service_provider_profile') else 0.0,
+        'telegram_bot_link': f'https://t.me/{settings.TELEGRAM_BOT_USERNAME}' if hasattr(user, 'service_provider_profile') else '',
         'services': service_provider.get_services_list() if hasattr(user, 'service_provider_profile') else []
     }}, status=status.HTTP_200_OK)
     
@@ -2001,7 +2004,8 @@ def confirm_payment_received(request, token):
 ####################################### TELEGRAM NEGOTIATION API #######################################
 from app.telegram_service import telegram_bot
 from decimal import Decimal
-
+from datetime import timedelta
+import asyncio
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def start_negotiation(request):
@@ -2036,7 +2040,7 @@ def start_negotiation(request):
     try:
         service_request = ServiceRequest.objects.get(
             id=service_request_id,
-            customer=request.user
+            # customer=request.user
         )
         
         provider_profile = ServiceProviderProfile.objects.get(user__id=provider_id)
@@ -2048,10 +2052,10 @@ def start_negotiation(request):
                 'message': 'Provider has not linked their Telegram account'
             }, status=status.HTTP_400_BAD_REQUEST)
         
-        # Check for existing active negotiation
+        # Check for existing active negotiation (using provider_phone to store telegram_chat_id)
         existing = NegotiationSession.objects.filter(
             service_request=service_request,
-            telegram_chat_id=provider.telegram_chat_id,
+            provider_phone=provider.telegram_chat_id,
             status='active'
         ).first()
         
@@ -2061,24 +2065,22 @@ def start_negotiation(request):
                 'session_id': str(existing.id)
             }, status=status.HTTP_400_BAD_REQUEST)
         
-        # Create negotiation session
+        # Create negotiation session (using provider_phone for telegram_chat_id)
         session = NegotiationSession.objects.create(
             service_request=service_request,
-            platform='telegram',
-            telegram_chat_id=provider.telegram_chat_id,
-            telegram_username=getattr(provider, 'telegram_username', None),
+            provider_phone=provider.telegram_chat_id,
             max_price=max_price,
             min_acceptable=min_acceptable,
             status='active',
             expires_at=timezone.now() + timedelta(hours=24)
         )
         
-        # Send initial message via Telegram (async)
-        async def send_initial_message():
-            await telegram_bot.send_negotiation_request(session)
-        
-        # Run async function
-        asyncio.run(send_initial_message())
+        # Send initial message via Telegram
+        telegram_bot.send_negotiation_request_sync(
+            chat_id=provider.telegram_chat_id,
+            service_request=service_request,
+            session=session
+        )
         
         return Response({
             'message': 'Negotiation started',

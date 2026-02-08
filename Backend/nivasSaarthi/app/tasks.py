@@ -2,6 +2,8 @@
 Celery tasks for automated multi-provider negotiation.
 """
 
+from linecache import cache
+from .models import NewUser
 from celery import shared_task
 from django.conf import settings
 from django.contrib.gis.geos import Point
@@ -10,6 +12,7 @@ from django.utils import timezone
 from datetime import timedelta
 from decimal import Decimal
 import logging
+from telegram import Bot
 
 logger = logging.getLogger(__name__)
 
@@ -297,3 +300,29 @@ def mark_offers_ready_if_complete(service_request_id: str):
             message=f"A provider has responded to your {types_str} request. More offers may be coming!",
             notification_type='new_offer'
         )
+        
+@shared_task
+def send_telegram_invitation(user_id):
+    """
+    Create in-app notification prompting user to link Telegram
+    """
+    user = NewUser.objects.get(id=user_id)
+    
+    from app.models import Notifications
+    
+    # Create notification
+    Notifications.objects.create(
+        user=user,
+        title="🔗 Link Your Telegram Account",
+        message=(
+            f"Get instant job notifications on Telegram! "
+            f"Search for @{settings.TELEGRAM_BOT_USERNAME} and send /start"
+        ),
+        notification_type="telegram_invitation"
+    )
+    
+    # Also store invitation status
+    from django.core.cache import cache
+    cache.set(f'telegram_invite_pending:{user.id}', True, timeout=2592000)  # 30 days
+    
+    print(f"✅ In-app invitation created for {user.first_name}")

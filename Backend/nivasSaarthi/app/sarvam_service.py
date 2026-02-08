@@ -67,7 +67,7 @@ def translate_text(text, source_lang, target_lang):
     target = lang_mapping.get(target_lang, target_lang)
     
     try:
-        response = client.translate(
+        response = client.text.translate(
             input=text,
             source_language_code=source,
             target_language_code=target,
