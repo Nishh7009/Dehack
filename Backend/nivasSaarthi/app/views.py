@@ -1760,7 +1760,7 @@ def get_request_offers(request, request_id):
                         'rating': profile.average_rating if profile else None,
                         'years_experience': profile.years_of_experience if profile else None,
                     },
-                    'offer_price': float(session.current_offer),
+                    'offer_price': float(session.current_offer) if session.current_offer else None,
                     'message_count': session.message_count,
                     'created_at': session.created_at.isoformat(),
                     'status': session.status,
