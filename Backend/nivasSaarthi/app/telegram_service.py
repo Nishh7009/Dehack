@@ -523,17 +523,35 @@ Your goal:
         service_id = query.data.replace("confirm_payment_", "")
         chat_id = str(update.effective_chat.id)
         
-        # Find the service
-        service = await sync_to_async(Service.objects.filter(id=service_id).first)()
+        print(f"[PAYMENT] Confirm payment clicked - service_id: {service_id}, chat_id: {chat_id}")
+        
+        # Find the service with related objects
+        try:
+            service = await sync_to_async(
+                lambda: Service.objects.select_related('customer', 'service_provider').filter(id=service_id).first()
+            )()
+        except Exception as e:
+            print(f"[PAYMENT] Error fetching service: {e}")
+            await query.edit_message_text("❌ Error fetching service.")
+            return
         
         if not service:
+            print(f"[PAYMENT] Service not found: {service_id}")
             await query.edit_message_text("❌ Service not found.")
             return
         
         # Verify this provider owns the service
-        provider = await sync_to_async(NewUser.objects.filter(telegram_chat_id=chat_id).first)()
+        provider = await sync_to_async(
+            lambda: NewUser.objects.filter(telegram_chat_id=chat_id).first()
+        )()
         
-        if not provider or service.service_provider_id != provider.id:
+        if not provider:
+            print(f"[PAYMENT] Provider not found for chat_id: {chat_id}")
+            await query.edit_message_text("❌ Could not find your account.")
+            return
+        
+        if str(service.service_provider_id) != str(provider.id):
+            print(f"[PAYMENT] Unauthorized - service_provider_id: {service.service_provider_id}, provider.id: {provider.id}")
             await query.edit_message_text("❌ Unauthorized - you are not the service provider.")
             return
         
@@ -541,19 +559,17 @@ Your goal:
         service.payment_status = 'CONFIRMED'
         service.completion_verification_from_provider = True
         await sync_to_async(service.save)()
-        
-        # Check if both verified - mark service as completed
-        if service.completion_verification_from_customer and service.completion_verification_from_provider:
-            service.service_status = 'COMPLETED'
-            await sync_to_async(service.save)()
+        print(f"[PAYMENT] Updated payment_status to CONFIRMED for service {service_id}")
         
         # Notify customer
+        customer = service.customer
         await sync_to_async(Notifications.objects.create)(
-            user=service.customer,
+            user=customer,
             title="Payment Confirmed! ✅",
             message=f"{provider.first_name} has confirmed receiving your payment of ₹{service.agreed_price or 'N/A'}.",
             notification_type='payment_confirmed'
         )
+        print(f"[PAYMENT] Notification sent to customer {customer.id}")
         
         # Send confirmation to provider
         target_lang = provider.preferred_language if provider else 'en'
@@ -573,31 +589,53 @@ Your goal:
         service_id = query.data.replace("deny_payment_", "")
         chat_id = str(update.effective_chat.id)
         
-        # Find the service
-        service = await sync_to_async(Service.objects.filter(id=service_id).first)()
+        print(f"[PAYMENT] Deny payment clicked - service_id: {service_id}, chat_id: {chat_id}")
+        
+        # Find the service with related objects
+        try:
+            service = await sync_to_async(
+                lambda: Service.objects.select_related('customer', 'service_provider').filter(id=service_id).first()
+            )()
+        except Exception as e:
+            print(f"[PAYMENT] Error fetching service: {e}")
+            await query.edit_message_text("❌ Error fetching service.")
+            return
         
         if not service:
+            print(f"[PAYMENT] Service not found: {service_id}")
             await query.edit_message_text("❌ Service not found.")
             return
         
         # Verify this provider owns the service
-        provider = await sync_to_async(NewUser.objects.filter(telegram_chat_id=chat_id).first)()
+        provider = await sync_to_async(
+            lambda: NewUser.objects.filter(telegram_chat_id=chat_id).first()
+        )()
         
-        if not provider or service.service_provider_id != provider.id:
+        if not provider:
+            print(f"[PAYMENT] Provider not found for chat_id: {chat_id}")
+            await query.edit_message_text("❌ Could not find your account.")
+            return
+        
+        if str(service.service_provider_id) != str(provider.id):
+            print(f"[PAYMENT] Unauthorized - service_provider_id: {service.service_provider_id}, provider.id: {provider.id}")
             await query.edit_message_text("❌ Unauthorized - you are not the service provider.")
             return
         
         # Revert payment status back to PENDING
         service.payment_status = 'PENDING'
+        service.service_status = 'IN_PROGRESS'  # Revert service status too
         await sync_to_async(service.save)()
+        print(f"[PAYMENT] Reverted payment_status to PENDING for service {service_id}")
         
         # Notify customer that payment was not received
+        customer = service.customer
         await sync_to_async(Notifications.objects.create)(
-            user=service.customer,
+            user=customer,
             title="Payment Issue ⚠️",
             message=f"{provider.first_name} has indicated they did not receive your payment for: {service.description}. Please check and try again.",
             notification_type='payment_issue'
         )
+        print(f"[PAYMENT] Notification sent to customer {customer.id}")
         
         # Send confirmation to provider
         target_lang = provider.preferred_language if provider else 'en'

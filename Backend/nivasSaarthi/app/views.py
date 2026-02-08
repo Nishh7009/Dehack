@@ -2326,10 +2326,12 @@ def mark_payment_made(request, service_id):
     """
     Customer marks that they have made payment.
     Sends a Telegram message to the provider with inline buttons to confirm or deny receipt.
+    
+    Similar to mark_service_complete but uses Telegram instead of WhatsApp.
     """
     from app import sarvam_service
     import requests as http_requests
-    import json
+    import secrets
     
     try:
         service = Service.objects.get(id=service_id)
@@ -2346,13 +2348,26 @@ def mark_payment_made(request, service_id):
             'message': f'Payment is already marked as {service.payment_status}'
         }, status=status.HTTP_400_BAD_REQUEST)
     
-    # Update payment status to PAID (awaiting provider confirmation)
+    # Update service status (like mark_service_complete does)
     service.payment_status = 'PAID'
     service.service_status = 'COMPLETED'
+    service.completion_verification_from_customer = True
+    
+    # Generate confirmation token (for fallback/alternative confirmation method)
+    token = secrets.token_urlsafe(32)
+    service.payment_confirmation_token = token
     service.save()
     
     # Get the provider
     provider = service.service_provider
+    
+    # Notify customer about their submission
+    Notifications.objects.create(
+        user=request.user,
+        title="Payment Marked! 💰",
+        message=f"You've marked payment of ₹{service.agreed_price or 'N/A'} as complete. Waiting for {provider.first_name} to confirm.",
+        notification_type='payment_marked'
+    )
     
     if not provider.telegram_chat_id:
         # Provider doesn't have Telegram - create in-app notification instead
@@ -2366,6 +2381,7 @@ def mark_payment_made(request, service_id):
             'message': 'Payment marked as made. Provider has been notified.',
             'service_id': str(service.id),
             'payment_status': service.payment_status,
+            'service_status': service.service_status,
             'notification_method': 'in-app'
         })
     
@@ -2382,21 +2398,33 @@ def mark_payment_made(request, service_id):
 
 Did you receive this payment?"""
     
+    # Button text in English
+    yes_button_text = "✅ Yes, I received payment"
+    no_button_text = "❌ No, I didn't receive it"
+    
     # Translate if provider has different language preference
     target_lang = provider.preferred_language or 'en'
     if target_lang != 'en':
         try:
-            translated = sarvam_service.translate_text(message, 'en', target_lang)
-            if translated:
-                message = translated
+            translated_msg = sarvam_service.translate_text(message, 'en', target_lang)
+            if translated_msg:
+                message = translated_msg
+            
+            # Translate button text
+            translated_yes = sarvam_service.translate_text(yes_button_text, 'en', target_lang)
+            translated_no = sarvam_service.translate_text(no_button_text, 'en', target_lang)
+            if translated_yes:
+                yes_button_text = translated_yes
+            if translated_no:
+                no_button_text = translated_no
         except Exception as e:
             print(f"Translation error: {e}")
     
     # Create inline keyboard with confirm/deny buttons
     inline_keyboard = {
         "inline_keyboard": [[
-            {"text": "✅ Yes, I received payment", "callback_data": f"confirm_payment_{service.id}"},
-            {"text": "❌ No, I didn't receive it", "callback_data": f"deny_payment_{service.id}"}
+            {"text": yes_button_text, "callback_data": f"confirm_payment_{service.id}"},
+            {"text": no_button_text, "callback_data": f"deny_payment_{service.id}"}
         ]]
     }
     
@@ -2413,9 +2441,11 @@ Did you receive this payment?"""
                 'message': 'Payment marked as made. Provider has been notified via Telegram.',
                 'service_id': str(service.id),
                 'payment_status': service.payment_status,
+                'service_status': service.service_status,
                 'notification_method': 'telegram'
             })
         else:
+            print(f"Telegram API error: {response.text}")
             # Telegram failed, create notification instead
             Notifications.objects.create(
                 user=provider,
@@ -2427,6 +2457,7 @@ Did you receive this payment?"""
                 'message': 'Payment marked as made. Provider has been notified.',
                 'service_id': str(service.id),
                 'payment_status': service.payment_status,
+                'service_status': service.service_status,
                 'notification_method': 'in-app (telegram failed)'
             })
             
@@ -2437,4 +2468,5 @@ Did you receive this payment?"""
             'service_id': str(service.id),
             'payment_status': service.payment_status
         })
+
 
