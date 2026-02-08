@@ -671,17 +671,17 @@ def request_service(request):
     
     Request body:
     - description: What the customer needs
-    - service_types: List of service types, e.g. ["plumbing", "electrical"]
+    - service_types: Comma-separated service types, e.g. "plumbing, electrical"
     - latitude: Customer's latitude
     - longitude: Customer's longitude
     - customer_budget: Maximum budget (same for all negotiations)
     - requested_date: (optional) When service is needed, format: DD_MM_YYYY
     """
-    from .tasks import negotiate_with_providers
     from decimal import Decimal
+    from .telegram_service import telegram_bot
     
     description = request.data.get('description')
-    service_types = request.data.get('service_types')  # Now a list
+    service_types = request.data.get('service_types')  # CSV string
     latitude = request.data.get('latitude')
     longitude = request.data.get('longitude')
     customer_budget = request.data.get('customer_budget')
@@ -693,28 +693,29 @@ def request_service(request):
             'message': 'description, service_types, latitude, longitude, and customer_budget are required'
         }, status=status.HTTP_400_BAD_REQUEST)
     
-    # Ensure service_types is a list
-    if isinstance(service_types, str):
-        service_types = [service_types]
-    
-    if not isinstance(service_types, list) or len(service_types) == 0:
-        return Response({
-            'message': 'service_types must be a non-empty list'
-        }, status=status.HTTP_400_BAD_REQUEST)
-    
     try:
         customer_budget = Decimal(str(customer_budget))
-        
-        # Parse requested date if provided
-        parsed_date = None
-        if requested_date:
+    except (ValueError, TypeError):
+        return Response({
+            'message': 'Invalid customer_budget format'
+        }, status=status.HTTP_400_BAD_REQUEST)
+    
+    # Parse requested date if provided
+    parsed_date = None
+    if requested_date:
+        try:
             parsed_date = datetime.datetime.strptime(requested_date, "%d_%m_%Y")
-        
+        except ValueError:
+            return Response({
+                'message': 'Invalid date format. Use DD_MM_YYYY'
+            }, status=status.HTTP_400_BAD_REQUEST)
+    
+    try:
         # Create the service request
         service_request = ServiceRequest.objects.create(
             customer=request.user,
             description=description,
-            service_types=service_types,  # Now a list
+            service_types=service_types,  # CSV string stored directly
             latitude=latitude,
             longitude=longitude,
             customer_budget=customer_budget,
@@ -722,99 +723,49 @@ def request_service(request):
             status='PENDING'
         )
         
-        
-        try:
-            max_price = Decimal(customer_budget)
-                
-        except (ValueError, TypeError):
+        # Get customer location for provider search
+        user_location = request.user.location
+        if user_location is None:
             return Response({
-                'message': 'Invalid price format'
+                'message': 'Customer location not found. Please complete your profile with location details.'
             }, status=status.HTTP_400_BAD_REQUEST)
         
-        try:
-            user_location = service_request.customer.location
-            if user_location is None:
-                return Response({
-                    'message': 'Customer location not found. Please complete your profile with location details.'
-                }, status=status.HTTP_400_BAD_REQUEST)
-        except Exception as e:
-            return Response({
-                'message': f'Error retrieving customer location: {str(e)}'
-            }, status=status.HTTP_400_BAD_REQUEST)
-        except (ValueError, TypeError) as e:
-            return Response(
-                {'message': f'Invalid parameter values: {str(e)}'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
-        # Query providers within radius
+        # Query providers within 5km radius
         providers_qs = NewUser.objects.filter(
             role=ROLES.SERVICE_PROVIDER,
             location__isnull=False,
-            profile_completed=True  # Only show providers with completed profiles
+            profile_completed=True
         ).annotate(
             distance=Distance('location', user_location)
         ).filter(
             distance__lte=D(km=5)
-        ).select_related('service_provider_profile').order_by('service_provider_profile__average_rating', 'distance')
+        ).select_related('service_provider_profile').order_by('distance')
         
         # Filter by service type if specified
         if service_types:
-            service_types = [s.strip().lower() for s in service_types.split(',')]
+            service_type_list = [s.strip().lower() for s in service_types.split(',')]
             q_filter = Q()
-            for st in service_types:
+            for st in service_type_list:
                 q_filter |= Q(service_provider_profile__services__icontains=st)
             providers_qs = providers_qs.filter(q_filter)
         
         providers_list = list(providers_qs)
-
-        # Build response data
-        providers_data = []
-        for p in providers_list:
-            try:
-                provider_data = {
-                    'id': str(p.id),
-                    'first_name': p.first_name or '',
-                    'last_name': p.last_name or '',
-                    'phone_number': p.phone_number or '',
-                    'email': p.email or '',
-                    'city': p.city or '',
-                    'address': p.address or '',
-                    'distance_km': round(p.distance.km, 2) if hasattr(p, 'distance') and p.distance else None,
-                }
-                
-                # Add service provider profile data
-                profile = getattr(p, 'service_provider_profile', None)
-                if profile:
-                    provider_data.update({
-                        'average_rating': float(profile.average_rating) if profile.average_rating else 0.0,
-                        'years_of_experience': int(profile.years_of_experience) if profile.years_of_experience else 0,
-                        'services': profile.get_services_list(),
-                        'bio': profile.bio or '',
-                    })
-                else:
-                    provider_data.update({
-                        'average_rating': 0.0,
-                        'years_of_experience': 0,
-                        'services': [],
-                        'bio': '',
-                    })
-                
-                providers_data.append(provider_data)
-            except Exception as e:
-                print(f"Error processing provider {p.id}: {str(e)}")
+        providers_contacted = 0
+        
+        # Create negotiation sessions and send messages to each provider
+        for provider in providers_list:
+            # Check if provider has Telegram linked
+            if not provider.telegram_chat_id:
+                # Create in-app notification for providers without Telegram
+                Notifications.objects.create(
+                    user=provider,
+                    title="New Service Request",
+                    message=f"New request for {service_types}: {description}. Budget: ₹{customer_budget}",
+                    notification_type='negotiated_offer'
+                )
                 continue
-            for p in providers_list:
-                provider = NewUser.objects.get(id=p.id)
-                
-
-            # Check if provider has Telegram chat_id
-            if not hasattr(provider, 'telegram_chat_id') or not provider.telegram_chat_id:
-                return Response({
-                    'message': 'Provider has not linked their Telegram account'
-                }, status=status.HTTP_400_BAD_REQUEST)
             
-            # Check for existing active negotiation (using provider_phone to store telegram_chat_id)
+            # Check for existing active negotiation
             existing = NegotiationSession.objects.filter(
                 service_request=service_request,
                 provider_phone=provider.telegram_chat_id,
@@ -822,39 +773,43 @@ def request_service(request):
             ).first()
             
             if existing:
-                return Response({
-                    'message': 'Active negotiation already exists',
-                    'session_id': str(existing.id)
-                }, status=status.HTTP_400_BAD_REQUEST)
+                continue
             
-            # Create negotiation session (using provider_phone for telegram_chat_id)
+            # Create negotiation session
             session = NegotiationSession.objects.create(
                 service_request=service_request,
                 provider_phone=provider.telegram_chat_id,
-                max_price=max_price,
+                max_price=customer_budget,
+                min_acceptable=customer_budget * Decimal('0.7'),  # Auto-accept at 70% of budget
                 status='active',
                 expires_at=timezone.now() + datetime.timedelta(hours=24)
             )
-
+            
             # Send initial message via Telegram
             telegram_bot.send_negotiation_request_sync(
                 chat_id=provider.telegram_chat_id,
                 service_request=service_request,
                 session=session
             )
-            
-            return Response({
-                'message': 'Service request created! AI is now finding providers and negotiating.',
-                'service_request_id': str(service_request.id),
-                'service_types': service_types,
-                'status': 'PENDING'
-            }, status=status.HTTP_201_CREATED)
-            
+            providers_contacted += 1
+        
+        # Update service request with providers contacted
+        service_request.providers_contacted = providers_contacted
+        service_request.status = 'NEGOTIATING' if providers_contacted > 0 else 'PENDING'
+        service_request.save()
+        
         return Response({
-        'message': 'Service request not found'
-        }, status=status.HTTP_404_NOT_FOUND)
+            'message': f'Service request created! Contacted {providers_contacted} providers.',
+            'service_request_id': str(service_request.id),
+            'providers_contacted': providers_contacted,
+            'service_types': service_types,
+            'status': service_request.status
+        }, status=status.HTTP_201_CREATED)
+        
     except Exception as e:
-        return Response({'message': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        return Response({
+            'message': f'Error creating service request: {str(e)}'
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 @api_view(['POST'])

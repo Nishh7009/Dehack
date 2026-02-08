@@ -147,7 +147,7 @@ class ServiceRequest(models.Model):
     
     # Service details
     description = models.TextField(help_text="What the customer needs")
-    service_types = models.JSONField(default=list, help_text="List of service types, e.g. ['plumbing', 'electrical']")
+    service_types = models.TextField(help_text="Comma-separated service types, e.g. 'plumbing, electrical'")
     
     # Customer's location for finding nearby providers
     latitude = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
