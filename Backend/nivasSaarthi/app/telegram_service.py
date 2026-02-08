@@ -340,13 +340,16 @@ class TelegramNegotiationBot:
         """Get AI-generated negotiation response using Sarvam"""
         try:
             from sarvamai import SarvamAI
+            from decimal import Decimal
             import os
             
             client = SarvamAI(api_subscription_key=os.getenv('SARVAM_API_KEY'))
             
             # Build context
             service_request = session.service_request
-            budget_info = f"Customer budget: ₹{session.min_acceptable} (ideal) to ₹{session.max_price} (max)"
+            min_price = float(session.min_acceptable)
+            max_price = float(session.max_price)
+            budget_info = f"Customer budget: ₹{min_price} (ideal) to ₹{max_price} (max)"
             
             system_prompt = f"""You are a friendly negotiation assistant helping a customer get the best price for a service.
             
@@ -357,7 +360,7 @@ Description: {service_request.description}
 Current offer from provider: ₹{offered_price}
 
 Your goal:
-- If price is above max budget (₹{session.max_price}), politely decline and suggest a lower price
+- If price is above max budget (₹{max_price}), politely decline and suggest a lower price
 - If price is between ideal and max, try to negotiate down closer to ideal
 - Be friendly and professional
 - Keep responses short (1-2 sentences)
@@ -369,19 +372,22 @@ Your goal:
             ]
             
             response = client.chat.completions(
-                model="sarvam-m",
                 messages=messages,
                 max_tokens=150
             )
             
             if hasattr(response, 'choices') and response.choices:
                 return response.choices[0].message.content
-            return f"Thank you for your offer of ₹{offered_price}. Could you consider ₹{session.min_acceptable + (session.max_price - session.min_acceptable) * 0.3:.0f}?"
+            
+            counter = min_price + (max_price - min_price) * 0.3
+            return f"Thank you for your offer of ₹{offered_price}. Could you consider ₹{counter:.0f}?"
             
         except Exception as e:
             print(f"AI negotiation error: {e}")
             # Fallback response
-            counter = session.min_acceptable + (session.max_price - session.min_acceptable) * 0.3
+            min_price = float(session.min_acceptable)
+            max_price = float(session.max_price)
+            counter = min_price + (max_price - min_price) * 0.3
             return f"Thank you for your offer. Our budget is around ₹{counter:.0f}. Would that work for you?"
 
     async def send_negotiation_options(self, update: Update, session, message: str, current_price: float):
