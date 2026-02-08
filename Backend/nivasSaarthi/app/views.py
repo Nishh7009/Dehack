@@ -1770,7 +1770,7 @@ def get_request_offers(request, request_id):
                 offers.append({
                     'session_id': str(session.id),
                     'provider': {'phone': session.provider_phone},
-                    'offer_price': float(session.current_offer),
+                    'offer_price': float(session.current_offer) if session.current_offer else None,
                     'message_count': session.message_count,
                     'created_at': session.created_at.isoformat()
                 })
