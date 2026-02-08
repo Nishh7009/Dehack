@@ -1774,13 +1774,16 @@ def get_request_offers(request, request_id):
                     'message_count': session.message_count,
                     'created_at': session.created_at.isoformat()
                 })
-        
-        return Response({
-            'request_id': str(service_request.id),
-            'status': service_request.status,
-            'offers_count': len(offers),
-            'offers': offers
-        })
+
+        if offers:
+            return Response({
+                'request_id': str(service_request.id),
+                'status': service_request.status,
+                'offers_count': len(offers),
+                'offers': offers
+            })
+        else:
+            return Response([], status=200)
         
     except ServiceRequest.DoesNotExist:
         return Response({'message': 'Service request not found'}, status=status.HTTP_404_NOT_FOUND)
