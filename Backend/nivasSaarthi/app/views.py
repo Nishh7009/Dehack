@@ -1797,12 +1797,39 @@ def select_offer(request, request_id):
     Creates the Service record with the chosen provider.
     """
     from .models import NegotiationSession, Service
-    from . import whatsapp_negotiator
+    from app import sarvam_service
+    import requests as http_requests
     
     session_id = request.data.get('session_id')
     
     if not session_id:
         return Response({'message': 'session_id is required'}, status=status.HTTP_400_BAD_REQUEST)
+    
+    def send_telegram_message(chat_id: str, message: str, target_lang: str = 'en') -> bool:
+        """Send a message via Telegram bot, with optional translation."""
+        bot_token = os.getenv('TELEGRAM_BOT_TOKEN')
+        if not bot_token or not chat_id:
+            return False
+        
+        # Translate if not English
+        if target_lang and target_lang != 'en':
+            try:
+                translated = sarvam_service.translate_text(message, 'en', target_lang)
+                if translated:
+                    message = translated
+            except Exception as e:
+                print(f"Translation error: {e}")
+        
+        url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+        try:
+            response = http_requests.post(url, json={
+                'chat_id': chat_id,
+                'text': message
+            })
+            return response.status_code == 200
+        except Exception as e:
+            print(f"Telegram send error: {e}")
+            return False
     
     try:
         service_request = ServiceRequest.objects.get(id=request_id, customer=request.user)
@@ -1814,10 +1841,15 @@ def select_offer(request, request_id):
                 'message': 'This is not a valid offer'
             }, status=status.HTTP_400_BAD_REQUEST)
         
-        # Find the provider
-        try:
-            provider = NewUser.objects.get(phone_number=session.provider_phone)
-        except NewUser.DoesNotExist:
+        # Find the provider - try by telegram_chat_id first, then by phone
+        provider = None
+        if session.provider_phone:
+            # provider_phone might be telegram_chat_id or actual phone number
+            provider = NewUser.objects.filter(telegram_chat_id=session.provider_phone).first()
+            if not provider:
+                provider = NewUser.objects.filter(phone_number=session.provider_phone).first()
+        
+        if not provider:
             return Response({'message': 'Provider not found'}, status=status.HTTP_404_NOT_FOUND)
         
         # Update service request
@@ -1834,17 +1866,20 @@ def select_offer(request, request_id):
             requested_on=service_request.requested_on or timezone.now()
         )
         
-        # Notify the selected provider
-        whatsapp_negotiator.send_whatsapp_message(
-            session.provider_phone,
-            f"""Great news! 🎉
+        # Notify the selected provider via Telegram
+        if provider.telegram_chat_id:
+            selected_message = f"""Great news! 🎉
 
 The customer has selected YOUR offer of ₹{session.current_offer}!
 
 Service details: {service_request.description}
 
 They'll be in touch soon to confirm the appointment. Thank you for using NivasSaarthi!"""
-        )
+            send_telegram_message(
+                provider.telegram_chat_id,
+                selected_message,
+                provider.preferred_language or 'en'
+            )
         
         # Notify other providers that the job was taken
         other_sessions = service_request.negotiations.filter(
@@ -1853,10 +1888,18 @@ They'll be in touch soon to confirm the appointment. Thank you for using NivasSa
         ).exclude(id=session.id)
         
         for other in other_sessions:
-            whatsapp_negotiator.send_whatsapp_message(
-                other.provider_phone,
-                f"Thank you for your offer. The customer has selected another provider for this job. We'll connect you with more opportunities soon! - NivasSaarthi"
-            )
+            # Find the other provider
+            other_provider = NewUser.objects.filter(telegram_chat_id=other.provider_phone).first()
+            if not other_provider:
+                other_provider = NewUser.objects.filter(phone_number=other.provider_phone).first()
+            
+            if other_provider and other_provider.telegram_chat_id:
+                rejection_message = "Thank you for your offer. The customer has selected another provider for this job. We'll connect you with more opportunities soon! - NivasSaarthi"
+                send_telegram_message(
+                    other_provider.telegram_chat_id,
+                    rejection_message,
+                    other_provider.preferred_language or 'en'
+                )
         
         # Create notification for provider
         Notifications.objects.create(
