@@ -244,8 +244,6 @@ def find_matching_providers(service_request):
         location__isnull=False
     ).annotate(
         distance=Distance('location', customer_location)
-    ).filter(
-        distance__lte=5000  # 5km in meters
     ).order_by('distance')
     
     # Filter by service types (providers store services as comma-separated string)
