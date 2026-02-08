@@ -731,12 +731,8 @@ def request_service(request):
         
         # Get customer location for provider search
         user_location = Point(float(longitude), float(latitude), srid=4326)
-        if user_location is None:
-            return Response({
-                'message': 'Customer location not found. Please complete your profile with location details.'
-            }, status=status.HTTP_400_BAD_REQUEST)
         
-        # Query providers within 5km radius
+        # Query providers within 5km radius (with location set)
         providers_qs = NewUser.objects.filter(
             role=ROLES.SERVICE_PROVIDER,
             location__isnull=False,
@@ -756,6 +752,22 @@ def request_service(request):
             providers_qs = providers_qs.filter(q_filter)
         
         providers_list = list(providers_qs)
+        
+        # Also include providers without location (fallback - notify all matching providers)
+        providers_without_location = NewUser.objects.filter(
+            role=ROLES.SERVICE_PROVIDER,
+            location__isnull=True,
+            profile_completed=True
+        ).select_related('service_provider_profile')
+        
+        if service_types:
+            q_filter = Q()
+            for st in service_type_list:
+                q_filter |= Q(service_provider_profile__services__icontains=st)
+            providers_without_location = providers_without_location.filter(q_filter)
+        
+        # Combine both lists
+        providers_list = list(providers_qs) + list(providers_without_location)
         providers_contacted = 0
         
         # Create negotiation sessions and send messages to each provider
