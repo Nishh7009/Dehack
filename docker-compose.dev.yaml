@@ -62,6 +62,8 @@ services:
     restart: always
     depends_on:
       - web
+    networks:
+      - app-network
 
   celery:
     build:
